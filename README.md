@@ -21,3 +21,7 @@ Drag to orbit, scroll to zoom. The panel controls camera distance and inclinatio
 
 Units use the Schwarzschild radius `rs = 1`. A photon's path is integrated with the acceleration
 `a = -1.5 h² r / |r|⁵`, where `h = |r × v|` is conserved. That one term reproduces the bending of light in Schwarzschild spacetime. In the binary scene each hole contributes its own term, so light feels both. That is an approximation: real binary spacetime has no exact formula and needs numerical relativity. The disk runs from the innermost stable circular orbit (3 rs) outward, with a Novikov–Thorne-style temperature profile coloured as a blackbody.
+
+## Music
+
+Click **♪ Off** in the panel header to turn on the background music, *钟楼下的阴影* by junesiyu (made with Suno). It is in `music.mp3`; replace that file to use a different track.
