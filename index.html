@@ -36,6 +36,19 @@
   button:hover { color: var(--text); }
   #stats { position: fixed; right: 16px; bottom: 16px; color: var(--muted); font-size: 12px;
     font-variant-numeric: tabular-nums; text-align: right; pointer-events: none; }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 4px 0 10px;
+    border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .modes label { text-align: center; padding: 5px 0; cursor: pointer; color: var(--muted); }
+  .modes input { position: absolute; opacity: 0; pointer-events: none; }
+  .modes label:has(input:checked) { background: rgba(255, 176, 84, 0.18); color: var(--text); }
+  .modes label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #status { color: var(--text); margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+  #restart { width: 100%; padding: 5px 8px; margin-top: 4px; }
+  #wave { position: fixed; right: 16px; bottom: 36px; width: 240px; max-width: calc(100vw - 32px);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px 6px;
+    pointer-events: none; }
+  #wave div { color: var(--muted); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+  #wave canvas { width: 100%; height: 56px; cursor: default; }
   #error { position: fixed; inset: 0; display: none; place-items: center; padding: 24px; text-align: center; }
 </style>
 </head>
@@ -45,12 +58,22 @@
 <div id="panel">
   <header>
     <div>
-      <h1>Schwarzschild black hole</h1>
+      <h1>Black hole</h1>
       <p>Light rays bent by gravity, ray-traced live. Drag to orbit, scroll to zoom.</p>
     </div>
     <button id="toggle" aria-label="Collapse panel">–</button>
   </header>
   <div class="body">
+    <div class="modes" role="radiogroup" aria-label="Scene">
+      <label><input type="radio" name="mode" id="modeSingle" value="single" checked> Single</label>
+      <label><input type="radio" name="mode" id="modeBinary" value="binary"> Binary merger</label>
+    </div>
+    <div id="binaryControls" hidden>
+      <div class="row"><label for="q">Mass ratio</label><output id="qOut"></output>
+        <input id="q" type="range" min="0.2" max="1" step="0.05" value="1"></div>
+      <div id="status"></div>
+      <button id="restart">Restart merger</button>
+    </div>
     <div class="row"><label for="dist">Camera distance</label><output id="distOut"></output>
       <input id="dist" type="range" min="6" max="60" step="0.1" value="24"></div>
     <div class="row"><label for="incl">Camera inclination</label><output id="inclOut"></output>
@@ -69,6 +92,7 @@
   </div>
 </div>
 
+<div id="wave" hidden><div>Gravitational-wave strain</div><canvas id="waveCanvas"></canvas></div>
 <div id="stats"></div>
 <div id="error">WebGL is not available in this browser, so the simulation cannot run.</div>
 
@@ -89,9 +113,12 @@ uniform float uDiskOut;
 uniform float uBright;
 uniform float uDoppler;
 uniform float uLensing;
+uniform vec4  uHoleA;   // xyz position, w Schwarzschild radius
+uniform vec4  uHoleB;   // w = 0 when there is only one hole
+uniform float uMass;    // total mass the disk orbits
 
-// Units: Schwarzschild radius rs = 1, so M = 0.5 and the photon sphere sits at r = 1.5.
-const int   MAX_STEPS = 300;
+// Units: the final (or only) hole has rs = 1, so M = 0.5 and its photon sphere sits at r = 1.5.
+const int   MAX_STEPS = 400;
 const float ESCAPE_R  = 80.0;
 
 float hash(vec3 p) {
@@ -154,13 +181,15 @@ vec4 diskSample(vec3 p, vec3 rayDir) {
   float r = length(p.xz);
   if (r < uDiskIn || r > uDiskOut) return vec4(0.0);
 
-  // Keplerian velocity v = sqrt(M / r) with M = 0.5, rotating counter-clockwise seen from +y.
-  float v = sqrt(0.5 / r);
+  // Keplerian velocity v = sqrt(M / r), rotating counter-clockwise seen from +y.
+  float v = sqrt(uMass / r);
   vec3 tangent = normalize(vec3(-p.z, 0.0, p.x));
   float gamma = 1.0 / sqrt(1.0 - v * v);
   float cosTheta = dot(tangent, -rayDir);
   float doppler = 1.0 / (gamma * (1.0 - v * cosTheta));
-  float gravShift = sqrt(max(1.0 - 1.0 / r, 0.0));
+  float potential = uHoleA.w / length(p - uHoleA.xyz);
+  if (uHoleB.w > 0.0) potential += uHoleB.w / length(p - uHoleB.xyz);
+  float gravShift = sqrt(max(1.0 - potential, 0.0));
   float g = mix(1.0, doppler * gravShift, uDoppler);
 
   // Novikov-Thorne-like temperature profile: zero at the inner edge, peaking just outside it.
@@ -184,14 +213,25 @@ vec4 diskSample(vec3 p, vec3 rayDir) {
   return vec4(col, alpha);
 }
 
+// Photon acceleration from one hole: a = -1.5 rs h^2 d / |d|^5, with h = |d x v|.
+vec3 holeAccel(vec3 pos, vec3 dir, vec4 hole) {
+  if (hole.w <= 0.0) return vec3(0.0);
+  vec3 d = pos - hole.xyz;
+  vec3 h = cross(d, dir);
+  return -1.5 * hole.w * dot(h, h) * d / pow(length(d), 5.0);
+}
+
+// Step length near one hole: small close in, large far away, scaled to the hole's size.
+float holeStep(float d, float rs) {
+  if (rs <= 0.0) return 1e4;
+  float n = d / rs;
+  return 0.06 * rs * n * n / (1.0 + n);
+}
+
 void main() {
   vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
   vec3 dir = normalize(uCamRot * vec3(uv, 1.6));
   vec3 pos = uCamPos;
-
-  // Conserved h = |r x v| drives the photon acceleration a = -1.5 h^2 r / |r|^5.
-  vec3 hVec = cross(pos, dir);
-  float h2 = dot(hVec, hVec);
 
   vec3 col = vec3(0.0);
   float trans = 1.0;
@@ -199,14 +239,15 @@ void main() {
 
   for (int i = 0; i < MAX_STEPS; i++) {
     float r = length(pos);
-    if (r < 1.0) { captured = true; break; }
+    float dA = length(pos - uHoleA.xyz);
+    float dB = length(pos - uHoleB.xyz);
+    if (dA < uHoleA.w || dB < uHoleB.w) { captured = true; break; }
     if (r > ESCAPE_R && dot(pos, dir) > 0.0) break;
 
-    // Small steps near the hole, large ones far away.
-    float dt = clamp(0.06 * r * r / (1.0 + r), 0.02, 1.6);
+    float dt = clamp(min(holeStep(dA, uHoleA.w), holeStep(dB, uHoleB.w)), 0.01, 1.6);
     if (abs(pos.y) < 1.0 && r < uDiskOut + 2.0) dt = min(dt, 0.12);
 
-    vec3 acc = -1.5 * h2 * pos / pow(r, 5.0) * uLensing;
+    vec3 acc = (holeAccel(pos, dir, uHoleA) + holeAccel(pos, dir, uHoleB)) * uLensing;
     vec3 prev = pos;
     dir += acc * dt;
     pos += dir * dt;
@@ -273,7 +314,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
 
   const loc = (p, n) => gl.getUniformLocation(p, n);
   const U = {};
-  for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing'])
+  for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing', 'uHoleA', 'uHoleB', 'uMass'])
     U[n] = loc(traceProg, n);
 
   // Ray-trace into a low-resolution texture, then stretch it over the canvas.
@@ -292,6 +333,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     doppler: true,
     lensing: true,
     spin: true,
+    mode: 'single',
+    q: 1,
   };
 
   const sliders = {
@@ -301,6 +344,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     bright: (v) => v.toFixed(2) + '×',
     speed: (v) => v.toFixed(2) + '×',
     res: (v) => Math.round(v * 100) + '%',
+    q: (v) => v.toFixed(2),
   };
   for (const [key, fmt] of Object.entries(sliders)) {
     const input = $(key), out = $(key + 'Out');
@@ -310,6 +354,122 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   }
   for (const key of ['doppler', 'lensing', 'spin'])
     $(key).addEventListener('change', (e) => { state[key] = e.target.checked; });
+
+  // Binary inspiral. Units have G = c = 1 and the merged hole at rs = 1 (M = 0.5).
+  // The pair starts with 5% more mass; that 5% leaves as gravitational waves at merger.
+  const RADIATED = 0.05;
+  const M_PRE = 0.5 / (1 - RADIATED);
+  const SEP_START = 4.5;
+  const TIME_SCALE = 10; // simulation time units per second at 1× speed
+  const binary = {};
+
+  function resetBinary() {
+    const m1 = M_PRE / (1 + state.q), m2 = M_PRE - m1;
+    Object.assign(binary, {
+      m1, m2, sep: SEP_START, phase: 0, merged: false, sinceMerge: 0,
+      diskIn: 1.8 * SEP_START, mergeStrain: 0, mergeOmega: 0,
+    });
+    wave.fill(0);
+  }
+
+  // Peters' formula for the shrinking separation: da/dt = -(64/5) m1 m2 M / a^3.
+  function stepBinary(dtUnits) {
+    const b = binary, M = b.m1 + b.m2;
+    if (!b.merged) {
+      const n = Math.ceil(dtUnits / 0.05);
+      for (let i = 0; i < n && !b.merged; i++) {
+        const h = dtUnits / n;
+        b.phase += Math.sqrt(M / b.sep ** 3) * h;
+        b.sep -= (64 / 5) * b.m1 * b.m2 * M / b.sep ** 3 * h;
+        if (b.sep <= 2 * M) {
+          // The horizons touch: one hole remains.
+          b.merged = true;
+          b.mergeStrain = strain();
+          b.mergeOmega = 2 * Math.sqrt(M / b.sep ** 3);
+        }
+      }
+    } else {
+      b.sinceMerge += dtUnits;
+      // With the binary gone, the gas drifts in toward the new innermost stable orbit.
+      b.diskIn += (3 - b.diskIn) * (1 - Math.exp(-dtUnits / 40));
+    }
+  }
+
+  // Quadrupole strain, up to a constant: h ~ m1 m2 / a · cos(2φ), then an exponential ringdown.
+  function strain() {
+    const b = binary;
+    if (!b.merged) return (b.m1 * b.m2 / b.sep) * Math.cos(2 * b.phase);
+    const t = b.sinceMerge;
+    return b.mergeStrain * Math.exp(-t / 4) * Math.cos(b.mergeOmega * 1.6 * t);
+  }
+
+  function holes() {
+    if (state.mode === 'single') return { a: [0, 0, 0, 1], b: [0, 0, 0, 0], mass: 0.5, diskIn: 3 };
+    const b = binary;
+    if (b.merged) {
+      // A brief, small ringdown wobble in the horizon size as the new hole settles.
+      const ring = 0.05 * Math.exp(-b.sinceMerge / 4) * Math.cos(b.mergeOmega * 1.6 * b.sinceMerge);
+      return { a: [0, 0, 0, 1 + ring], b: [0, 0, 0, 0], mass: 0.5, diskIn: b.diskIn };
+    }
+    const M = b.m1 + b.m2;
+    const c = Math.cos(b.phase), s = Math.sin(b.phase);
+    // Positions about the centre of mass, orbiting in the disk plane.
+    const r1 = b.sep * b.m2 / M, r2 = b.sep * b.m1 / M;
+    return {
+      a: [-r1 * c, 0, -r1 * s, 2 * b.m1],
+      b: [r2 * c, 0, r2 * s, 2 * b.m2],
+      mass: M,
+      diskIn: b.diskIn,
+    };
+  }
+
+  function statusText() {
+    const b = binary;
+    if (b.merged) return `Merged · ${Math.round(RADIATED * 100)}% of the mass left as gravitational waves`;
+    const M = b.m1 + b.m2;
+    const period = 2 * Math.PI * Math.sqrt(b.sep ** 3 / M) / TIME_SCALE;
+    return `Inspiral · separation ${b.sep.toFixed(2)} rs · orbit ${period.toFixed(1)} s`;
+  }
+
+  const wave = new Float32Array(600);
+  let waveHead = 0;
+  const waveCanvas = $('waveCanvas');
+  const wctx = waveCanvas.getContext('2d');
+
+  function drawWave() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.round(waveCanvas.clientWidth * dpr), h = Math.round(waveCanvas.clientHeight * dpr);
+    if (waveCanvas.width !== w || waveCanvas.height !== h) { waveCanvas.width = w; waveCanvas.height = h; }
+    wctx.clearRect(0, 0, w, h);
+    wctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    wctx.lineWidth = dpr;
+    wctx.beginPath(); wctx.moveTo(0, h / 2); wctx.lineTo(w, h / 2); wctx.stroke();
+    // Scale so the strain at merger nearly fills the chart.
+    const peak = binary.m1 * binary.m2 / (2 * (binary.m1 + binary.m2));
+    wctx.strokeStyle = '#ffb054';
+    wctx.lineWidth = 1.5 * dpr;
+    wctx.beginPath();
+    for (let i = 0; i < wave.length; i++) {
+      const v = wave[(waveHead + i) % wave.length];
+      const x = i / (wave.length - 1) * w;
+      const y = h / 2 - Math.max(-1, Math.min(1, v / peak)) * (h / 2 - 2 * dpr);
+      i ? wctx.lineTo(x, y) : wctx.moveTo(x, y);
+    }
+    wctx.stroke();
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    const isBinary = mode === 'binary';
+    $('binaryControls').hidden = !isBinary;
+    $('wave').hidden = !isBinary;
+    resetBinary();
+  }
+  for (const id of ['modeSingle', 'modeBinary'])
+    $(id).addEventListener('change', (e) => { if (e.target.checked) setMode(e.target.value); });
+  $('restart').addEventListener('click', resetBinary);
+  $('q').addEventListener('change', resetBinary);
+  resetBinary();
 
   $('toggle').addEventListener('click', () => {
     const panel = $('panel');
@@ -393,6 +553,12 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
     simTime += dt * state.speed;
+    if (state.mode === 'binary') {
+      stepBinary(dt * state.speed * TIME_SCALE);
+      wave[waveHead] = strain();
+      waveHead = (waveHead + 1) % wave.length;
+    }
+    const hs = holes();
     if (state.spin && !drag) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
 
@@ -406,8 +572,13 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     gl.uniform1f(U.uTime, simTime);
     gl.uniform3fv(U.uCamPos, cam.pos);
     gl.uniformMatrix3fv(U.uCamRot, false, cam.rot);
-    gl.uniform1f(U.uDiskIn, 3.0); // innermost stable circular orbit, 3 rs
-    gl.uniform1f(U.uDiskOut, state.diskOuter);
+    // A lone hole's disk starts at the innermost stable circular orbit, 3 rs;
+    // around a binary the gas keeps clear of the orbit, leaving a wider cavity.
+    gl.uniform1f(U.uDiskIn, hs.diskIn);
+    gl.uniform1f(U.uDiskOut, Math.max(state.diskOuter, hs.diskIn + 5));
+    gl.uniform4fv(U.uHoleA, hs.a);
+    gl.uniform4fv(U.uHoleB, hs.b);
+    gl.uniform1f(U.uMass, hs.mass);
     gl.uniform1f(U.uBright, state.bright);
     gl.uniform1f(U.uDoppler, state.doppler ? 1 : 0);
     gl.uniform1f(U.uLensing, state.lensing ? 1 : 0);
@@ -428,6 +599,10 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       fps = frames * 1000 / (now - fpsAt);
       frames = 0; fpsAt = now;
       $('stats').textContent = `${fps.toFixed(0)} fps · ${lowW}×${lowH} rays`;
+    }
+    if (state.mode === 'binary') {
+      $('status').textContent = statusText();
+      drawWave();
     }
     requestAnimationFrame(frame);
   }

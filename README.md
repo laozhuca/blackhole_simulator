@@ -9,6 +9,8 @@ Each pixel traces a light ray backward through curved spacetime, so you see:
 - Doppler beaming and gravitational redshift (the approaching side of the disk is brighter and bluer)
 - a starfield that bends near the hole
 
+Switch the scene to **Binary merger** to watch two black holes spiral together and merge into one. Their orbit shrinks as they lose energy to gravitational waves (Peters' formula), and both bend light at once. When the horizons touch, a single hole remains with 5% less mass. A strip chart shows the gravitational-wave signal: a rising chirp, then a short ringdown. The mass-ratio slider sets how unequal the two holes are.
+
 ## Run it
 
 Open `index.html` in any browser with WebGL.
@@ -18,4 +20,4 @@ Drag to orbit, scroll to zoom. The panel controls camera distance and inclinatio
 ## How it works
 
 Units use the Schwarzschild radius `rs = 1`. A photon's path is integrated with the acceleration
-`a = -1.5 h² r / |r|⁵`, where `h = |r × v|` is conserved. That one term reproduces the bending of light in Schwarzschild spacetime. The disk runs from the innermost stable circular orbit (3 rs) outward, with a Novikov–Thorne-style temperature profile coloured as a blackbody.
+`a = -1.5 h² r / |r|⁵`, where `h = |r × v|` is conserved. That one term reproduces the bending of light in Schwarzschild spacetime. In the binary scene each hole contributes its own term, so light feels both. That is an approximation: real binary spacetime has no exact formula and needs numerical relativity. The disk runs from the innermost stable circular orbit (3 rs) outward, with a Novikov–Thorne-style temperature profile coloured as a blackbody.
