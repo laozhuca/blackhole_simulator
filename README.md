@@ -24,4 +24,4 @@ Units use the Schwarzschild radius `rs = 1`. A photon's path is integrated with 
 
 ## Music
 
-Click **♪ Off** in the panel header to turn on the background music, *钟楼下的阴影* by junesiyu (made with Suno). It is in `music.mp3`; replace that file to use a different track.
+Background music, *Misterio en el Agujero Negro* by junesiyu (made with Suno), is on by default. Browsers block sound until the visitor interacts with the page, so it starts at the first click or key press if it cannot start right away. The **♪** button in the panel header turns it off and on. The track is `music.mp3`; replace that file to use a different one.

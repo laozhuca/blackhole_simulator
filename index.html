@@ -64,7 +64,7 @@
       <p>Light rays bent by gravity, ray-traced live. Drag to orbit, scroll to zoom.</p>
     </div>
     <div class="header-buttons">
-      <button id="music" aria-pressed="false" title="Background music: 钟楼下的阴影">♪ Off</button>
+      <button id="music" aria-pressed="true" title="Background music: Misterio en el Agujero Negro">♪ On</button>
       <button id="toggle" aria-label="Collapse panel">–</button>
     </div>
   </header>
@@ -97,7 +97,7 @@
   </div>
 </div>
 
-<audio id="track" src="music.mp3" loop preload="none"></audio>
+<audio id="track" src="music.mp3" loop preload="auto"></audio>
 <div id="wave" hidden><div>Gravitational-wave strain</div><canvas id="waveCanvas"></canvas></div>
 <div id="stats"></div>
 <div id="error">WebGL is not available in this browser, so the simulation cannot run.</div>
@@ -477,18 +477,28 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   $('q').addEventListener('change', resetBinary);
   resetBinary();
 
-  // Browsers only allow sound after a click, so the music starts from this button.
+  // Music is on by default. Browsers block sound until the visitor interacts,
+  // so if playing right away is refused, it starts on the first click or key press.
   const track = $('track');
   track.volume = 0.5;
   const musicButton = $('music');
-  const showMusic = (on) => {
-    musicButton.setAttribute('aria-pressed', String(on));
-    musicButton.textContent = on ? '♪ On' : '♪ Off';
+  let musicOn = true;
+  const showMusic = () => {
+    musicButton.setAttribute('aria-pressed', String(musicOn));
+    musicButton.textContent = musicOn ? '♪ On' : '♪ Off';
   };
+  const playIfOn = () => { if (musicOn && track.paused) track.play().catch(() => {}); };
   musicButton.addEventListener('click', () => {
-    if (track.paused) track.play().then(() => showMusic(true), () => showMusic(false));
-    else { track.pause(); showMusic(false); }
+    musicOn = !musicOn;
+    if (musicOn) playIfOn(); else track.pause();
+    showMusic();
   });
+  const unlock = () => {
+    playIfOn();
+    if (!track.paused || !musicOn) for (const t of ['pointerdown', 'keydown']) document.removeEventListener(t, unlock);
+  };
+  for (const t of ['pointerdown', 'keydown']) document.addEventListener(t, unlock);
+  playIfOn();
 
   $('toggle').addEventListener('click', () => {
     const panel = $('panel');
