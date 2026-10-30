@@ -15,7 +15,7 @@ Switch the scene to **Binary merger** to watch two black holes spiral together a
 
 Open `index.html` in any browser with WebGL.
 
-Drag to orbit, scroll to zoom. The panel controls camera distance and inclination, disk size and brightness, time speed and render scale, and toggles Doppler effects, lensing and auto-orbit. Lower **Render scale** if it runs slowly.
+Drag to orbit; scroll or pinch to zoom. On an iPad or other touch screen, drag with one finger to orbit and pinch with two to zoom. The panel controls camera distance and inclination, disk size and brightness, time speed and render scale, and toggles Doppler effects, lensing and auto-orbit. Lower **Render scale** if it runs slowly.
 
 ## How it works
 

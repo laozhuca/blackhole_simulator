@@ -61,7 +61,7 @@
   <header>
     <div>
       <h1>Black hole</h1>
-      <p>Light rays bent by gravity, ray-traced live. Drag to orbit, scroll to zoom.</p>
+      <p>Light rays bent by gravity, ray-traced live. Drag to orbit; scroll or pinch to zoom.</p>
     </div>
     <div class="header-buttons">
       <button id="music" aria-pressed="true" title="Background music: Misterio en el Agujero Negro">♪ On</button>
@@ -493,11 +493,13 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     if (musicOn) playIfOn(); else track.pause();
     showMusic();
   });
+  // On touch screens a tap only counts once the finger lifts, so listen for that too.
+  const unlockEvents = ['pointerdown', 'pointerup', 'touchend', 'keydown'];
   const unlock = () => {
     playIfOn();
-    if (!track.paused || !musicOn) for (const t of ['pointerdown', 'keydown']) document.removeEventListener(t, unlock);
+    if (!track.paused || !musicOn) for (const t of unlockEvents) document.removeEventListener(t, unlock);
   };
-  for (const t of ['pointerdown', 'keydown']) document.addEventListener(t, unlock);
+  for (const t of unlockEvents) document.addEventListener(t, unlock);
   playIfOn();
 
   $('toggle').addEventListener('click', () => {
@@ -506,30 +508,56 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     $('toggle').textContent = panel.classList.contains('collapsed') ? '+' : '–';
   });
 
-  // Orbit controls.
-  let drag = null;
-  canvas.addEventListener('pointerdown', (e) => {
-    drag = { x: e.clientX, y: e.clientY };
-    canvas.setPointerCapture(e.pointerId);
-    canvas.classList.add('dragging');
-  });
-  canvas.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    state.yaw -= (e.clientX - drag.x) * 0.005;
-    state.incl = Math.max(-89, Math.min(89, state.incl + (e.clientY - drag.y) * 0.25));
-    $('incl').value = state.incl;
-    $('inclOut').textContent = sliders.incl(state.incl);
-    drag = { x: e.clientX, y: e.clientY };
-  });
-  const endDrag = () => { drag = null; canvas.classList.remove('dragging'); };
-  canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', endDrag);
-  canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    state.dist = Math.max(6, Math.min(60, state.dist * Math.exp(e.deltaY * 0.001)));
+  // Orbit controls: one finger or the mouse drags to orbit; two fingers pinch to zoom.
+  const pointers = new Map();
+  let pinch = null;
+  const dragging = () => pointers.size > 0;
+  const fingerSpacing = () => {
+    const [a, b] = [...pointers.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
+  function setDist(d) {
+    state.dist = Math.max(6, Math.min(60, d));
     $('dist').value = state.dist;
     $('distOut').textContent = sliders.dist(state.dist);
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add('dragging');
+    if (pointers.size === 2) pinch = { spacing: fingerSpacing(), dist: state.dist };
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const prev = pointers.get(e.pointerId);
+    if (!prev) return;
+    const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch) {
+      // Spreading the fingers apart moves the camera closer.
+      const spacing = fingerSpacing();
+      if (spacing > 0) setDist(pinch.dist * pinch.spacing / spacing);
+      return;
+    }
+    state.yaw -= dx * 0.005;
+    state.incl = Math.max(-89, Math.min(89, state.incl + dy * 0.25));
+    $('incl').value = state.incl;
+    $('inclOut').textContent = sliders.incl(state.incl);
+  });
+  const endPointer = (e) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 2) pinch = { spacing: fingerSpacing(), dist: state.dist };
+    if (!pointers.size) canvas.classList.remove('dragging');
+  };
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    setDist(state.dist * Math.exp(e.deltaY * 0.001));
   }, { passive: false });
+  // Safari fires its own pinch gestures; keep them from zooming the whole page.
+  for (const t of ['gesturestart', 'gesturechange'])
+    document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -588,7 +616,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       waveHead = (waveHead + 1) % wave.length;
     }
     const hs = holes();
-    if (state.spin && !drag) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
+    if (state.spin && !dragging()) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
 
     const cam = cameraBasis();
