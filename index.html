@@ -330,8 +330,10 @@ vec3 streamDensity(vec3 p) {
 }
 
 // Twin relativistic jets along the disk's spin axis, as in microquasars like SS 433.
-// Plasma moves out at JET_BETA times the speed of light in bright knots. Returns the
-// emission at p for light heading along rayDir, and how wide the jet is there.
+// Magnetic fields launch them from the inner disk in a faint, wide funnel; the jet then
+// narrows and speeds up, and only becomes bright from about the disk's inner edge
+// outward, peaking where knots of plasma form farther out. Returns the emission at p
+// for light heading along rayDir, and how wide the jet is there.
 const float JET_BETA = 0.9;
 const float JET_LENGTH = 34.0;
 vec4 jetEmission(vec3 p, vec3 rayDir) {
@@ -339,17 +341,21 @@ vec4 jetEmission(vec3 p, vec3 rayDir) {
   float h = rel.y;
   float ah = abs(h);
   float radial = length(rel.xz);
-  float width = 0.3 + 0.06 * ah;
+  // Wide near the base, collimating with height.
+  float width = 0.35 + 0.05 * ah + 1.6 * exp(-ah / 2.5);
   if (ah > JET_LENGTH || radial > width * 4.0) return vec4(0.0, 0.0, 0.0, width);
   float core = exp(-radial * radial / (width * width));
-  float body = smoothstep(1.2, 2.6, ah) * (1.0 - smoothstep(JET_LENGTH * 0.55, JET_LENGTH, ah));
-  // Knots travel outward; the jet fades as it spreads.
-  float knots = 0.35 + 0.65 * pow(0.5 + 0.5 * sin(ah * 0.55 - uTime * 3.5), 4.0);
-  float rho = core * body * knots / (1.0 + 0.12 * ah);
-  // Relativistic beaming: emission scales as the Doppler factor cubed.
-  float gamma = 1.0 / sqrt(1.0 - JET_BETA * JET_BETA);
+  float funnel = 0.12 * smoothstep(1.0, 3.0, ah) * (1.0 - smoothstep(4.0, 8.0, ah));
+  float ramp = smoothstep(4.5, 12.0, ah);
+  float body = (funnel + ramp) * (1.0 - smoothstep(JET_LENGTH * 0.55, JET_LENGTH, ah));
+  // Knots travel outward, growing as the jet gets going; the jet fades as it spreads.
+  float knots = 1.0 + ramp * (0.65 * pow(0.5 + 0.5 * sin(ah * 0.55 - uTime * 3.5), 4.0) - 0.4);
+  float rho = core * body * knots / (1.0 + 0.08 * ah);
+  // The plasma accelerates with height; emission is beamed by the Doppler factor cubed.
+  float beta = mix(0.3, JET_BETA, smoothstep(2.0, 12.0, ah));
+  float gamma = 1.0 / sqrt(1.0 - beta * beta);
   float cosTheta = sign(h) * dot(vec3(0.0, 1.0, 0.0), -rayDir);
-  float delta = mix(1.0, 1.0 / (gamma * (1.0 - JET_BETA * cosTheta)), uDoppler);
+  float delta = mix(1.0, 1.0 / (gamma * (1.0 - beta * cosTheta)), uDoppler);
   float beam = min(delta * delta * delta, 40.0);
   // Synchrotron glow: blue-violet, bluer where beamed toward us, redder where beamed away.
   vec3 tint = mix(vec3(0.75, 0.45, 1.0), vec3(0.55, 0.75, 1.0), clamp(delta * 0.5, 0.0, 1.0));
