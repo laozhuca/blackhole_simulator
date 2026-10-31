@@ -77,6 +77,7 @@
     <div id="starControls" hidden>
       <div class="row"><label for="starMass">Star mass</label><output id="starMassOut"></output>
         <input id="starMass" type="range" min="0.3" max="1.5" step="0.05" value="0.6"></div>
+      <label class="check"><input id="jets" type="checkbox" checked> Relativistic jets</label>
       <div id="starStatus"></div>
     </div>
     <div id="binaryControls" hidden>
@@ -135,6 +136,7 @@ uniform float uStarTemp;
 uniform vec3  uStream[8];  // gas stream from the star to the disk, as a polyline
 uniform float uStreamReach; // 0 when there is no stream
 uniform float uArmStrength; // tidal spiral arms in the disk; 0 when there is no star
+uniform vec4  uJet;         // xyz base (the hole), w = 1 when the jets are on
 
 // Units: the final (or only) hole has rs = 1, so M = 0.5 and its photon sphere sits at r = 1.5.
 const int   MAX_STEPS = 400;
@@ -327,6 +329,33 @@ vec3 streamDensity(vec3 p) {
   return vec3(rho, bestS, halo);
 }
 
+// Twin relativistic jets along the disk's spin axis, as in microquasars like SS 433.
+// Plasma moves out at JET_BETA times the speed of light in bright knots. Returns the
+// emission at p for light heading along rayDir, and how wide the jet is there.
+const float JET_BETA = 0.9;
+const float JET_LENGTH = 34.0;
+vec4 jetEmission(vec3 p, vec3 rayDir) {
+  vec3 rel = p - uJet.xyz;
+  float h = rel.y;
+  float ah = abs(h);
+  float radial = length(rel.xz);
+  float width = 0.3 + 0.06 * ah;
+  if (ah > JET_LENGTH || radial > width * 4.0) return vec4(0.0, 0.0, 0.0, width);
+  float core = exp(-radial * radial / (width * width));
+  float body = smoothstep(1.2, 2.6, ah) * (1.0 - smoothstep(JET_LENGTH * 0.55, JET_LENGTH, ah));
+  // Knots travel outward; the jet fades as it spreads.
+  float knots = 0.35 + 0.65 * pow(0.5 + 0.5 * sin(ah * 0.55 - uTime * 3.5), 4.0);
+  float rho = core * body * knots / (1.0 + 0.12 * ah);
+  // Relativistic beaming: emission scales as the Doppler factor cubed.
+  float gamma = 1.0 / sqrt(1.0 - JET_BETA * JET_BETA);
+  float cosTheta = sign(h) * dot(vec3(0.0, 1.0, 0.0), -rayDir);
+  float delta = mix(1.0, 1.0 / (gamma * (1.0 - JET_BETA * cosTheta)), uDoppler);
+  float beam = min(delta * delta * delta, 40.0);
+  // Synchrotron glow: blue-violet, bluer where beamed toward us, redder where beamed away.
+  vec3 tint = mix(vec3(0.75, 0.45, 1.0), vec3(0.55, 0.75, 1.0), clamp(delta * 0.5, 0.0, 1.0));
+  return vec4(tint * rho * beam, width);
+}
+
 void main() {
   // Scale by the shorter side, so the scene fits on portrait screens as well as landscape ones.
   vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / min(uRes.x, uRes.y);
@@ -365,6 +394,14 @@ void main() {
 
     if (abs(pos.y) < 3.0 && rDisk < uDiskOut * 1.4 + 1.0)
       col += trans * diskHaze(pos) * dt * 0.04 * uBright;
+
+    if (uJet.w > 0.0) {
+      vec4 jet = jetEmission(pos, normalize(dir));
+      // Small steps inside the narrow beam, so it is sampled, not stepped over.
+      if (length((pos - uJet.xyz).xz) < jet.w * 4.0 && abs(pos.y - uJet.y) < JET_LENGTH)
+        dt = min(dt, max(jet.w * 0.6, 0.08));
+      col += trans * jet.rgb * dt * 2.2;
+    }
 
     if (uStar.w > 0.0) {
       // Slow down near the star so rays do not step over its edge, and add its glow.
@@ -468,7 +505,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   const loc = (p, n) => gl.getUniformLocation(p, n);
   const U = {};
   for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing', 'uHoleA', 'uHoleB', 'uMass',
-                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach', 'uArmStrength'])
+                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach', 'uArmStrength', 'uJet'])
     U[n] = loc(traceProg, n);
 
   // Ray-trace into a low-resolution texture, then stretch it over the canvas.
@@ -490,6 +527,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     mode: 'single',
     q: 1,
     starMass: 0.6,
+    jets: true,
   };
 
   const sliders = {
@@ -509,7 +547,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     input.addEventListener('input', sync);
     sync();
   }
-  for (const key of ['doppler', 'lensing', 'spin'])
+  for (const key of ['doppler', 'lensing', 'spin', 'jets'])
     $(key).addEventListener('change', (e) => { state[key] = e.target.checked; });
 
   // Binary inspiral. Units have G = c = 1 and the merged hole at rs = 1 (M = 0.5).
@@ -612,6 +650,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       stream, streamReach: g.l1,
       // A heavier star raises stronger tides, and stronger arms.
       armStrength: 0.5 + 0.5 * Math.min(state.starMass, 1.5) / 1.5,
+      jet: [...hole, state.jets ? 1 : 0],
     };
   }
 
@@ -624,7 +663,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
 
   const NO_EXTRAS = {
     diskCenter: [0, 0, 0], star: [0, 0, 0, 0], starShape: [1, 0, 0, 1], starTemp: 5800,
-    stream: new Array(24).fill(0), streamReach: 0, armStrength: 0,
+    stream: new Array(24).fill(0), streamReach: 0, armStrength: 0, jet: [0, 0, 0, 0],
   };
 
   function holes() {
@@ -871,6 +910,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     gl.uniform3fv(U.uStream, hs.stream);
     gl.uniform1f(U.uStreamReach, hs.streamReach);
     gl.uniform1f(U.uArmStrength, hs.armStrength);
+    gl.uniform4fv(U.uJet, hs.jet);
     gl.uniform4fv(U.uHoleA, hs.a);
     gl.uniform4fv(U.uHoleB, hs.b);
     gl.uniform1f(U.uMass, hs.mass);
