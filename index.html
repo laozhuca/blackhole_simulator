@@ -46,7 +46,7 @@
   #status, #starStatus, #whaleStatus { color: var(--text); margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
   .header-buttons { display: flex; gap: 6px; flex-shrink: 0; }
   #music[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
-  #restart { width: 100%; padding: 5px 8px; margin-top: 4px; }
+  #restart, #replayIntro { width: 100%; padding: 5px 8px; margin-top: 4px; }
   #wave { position: fixed; right: 16px; bottom: 36px; width: 240px; max-width: calc(100vw - 32px);
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px 6px;
     pointer-events: none; }
@@ -78,6 +78,7 @@
     </div>
     <div id="whaleControls" hidden>
       <div id="whaleStatus"></div>
+      <button id="replayIntro">Replay the opening</button>
     </div>
     <div id="starControls" hidden>
       <div class="row"><label for="starMass">Star mass</label><output id="starMassOut"></output>
@@ -876,7 +877,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   // The space whale: a fantasy scene. three.js draws the model from the same camera into
   // its own canvas, which becomes a texture the ray tracer bends around the hole.
   const whale = { state: 'idle', canvas: null, renderer: null, scene: null, camera: null,
-                  model: null, material: null, pos: [0, 0, 0] };
+                  model: null, material: null, pos: [0, 0, 0], intro: null, diskLight: null };
   const whaleTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, whaleTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
@@ -910,7 +911,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     }
   }
 
-  const whaleUniforms = { uSwim: { value: 0 }, uMouth: { value: 0 } };
+  const whaleUniforms = { uSwim: { value: 0 }, uMouth: { value: 0 }, uRim: { value: null } };
 
   // The model has no skeleton or animation, so it is posed in the vertex shader. In model
   // space it is 1.9 long along z (head at +z), the side fins reach x = +-0.45 at z 0-0.4,
@@ -946,32 +947,36 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.renderer.setPixelRatio(1);
     whale.renderer.setClearColor(0x000000, 0);
     whale.renderer.outputEncoding = THREE.sRGBEncoding;
+    whale.renderer.physicallyCorrectLights = true;
     whale.scene = new THREE.Scene();
     whale.camera = new THREE.PerspectiveCamera(35, 1, 0.1, 300);
 
-    // Light from the disk at the centre, a cool rim light, and a dim fill.
-    whale.scene.add(new THREE.AmbientLight(0x445577, 0.7));
-    const diskLight = new THREE.PointLight(0xffc27a, 2.2, 0, 1.2);
-    whale.scene.add(diskLight);
-    const rim = new THREE.DirectionalLight(0x88aaff, 0.9);
-    rim.position.set(-1, 2, -1);
-    whale.scene.add(rim);
+    // The hole's disk is the light: warm, at the centre, falling off with the square of
+    // distance. A whisper of cool starlight keeps the shadowed side from going fully black.
+    whale.diskLight = new THREE.PointLight(0xffc690, 300, 0, 2);
+    whale.scene.add(whale.diskLight);
+    whale.scene.add(new THREE.AmbientLight(0x2a3a55, 0.14));
+    whaleUniforms.uRim.value = new THREE.Color(0, 0, 0);
 
     model.traverse((o) => {
       if (!o.isMesh) return;
       const m = o.material;
-      // Fully metallic with nothing to reflect renders black, so tone it down and let the
-      // neon texture glow on its own.
+      // Fully metallic with nothing to reflect renders black, so make it less so; it gives
+      // off no light of its own.
       m.metalness = 0.35;
       m.roughness = 0.5;
-      m.emissive = new THREE.Color(0xffffff);
-      m.emissiveMap = m.map;
-      m.emissiveIntensity = 0.3;
       m.onBeforeCompile = (shader) => {
         shader.uniforms.uSwim = whaleUniforms.uSwim;
         shader.uniforms.uMouth = whaleUniforms.uMouth;
+        shader.uniforms.uRim = whaleUniforms.uRim;
         shader.vertexShader = 'uniform float uSwim;\nuniform float uMouth;\n' + shader.vertexShader.replace(
           '#include <begin_vertex>', '#include <begin_vertex>\n' + WHALE_POSE);
+        // When the bright disk is behind the whale, its light wraps round the outline.
+        shader.fragmentShader = 'uniform vec3 uRim;\n' + shader.fragmentShader.replace(
+          '#include <lights_fragment_end>',
+          `#include <lights_fragment_end>
+           reflectedLight.directDiffuse += uRim * diffuseColor.rgb *
+             pow(1.0 - saturate(abs(dot(normal, normalize(vViewPosition)))), 3.0);`);
       };
       whale.material = m;
     });
@@ -982,24 +987,73 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.model = holder;
   }
 
-  // Where the whale is at simulation time t: a tilted, bobbing loop around the hole.
-  function whalePath(t) {
-    const th = t * 0.12, R = 11 + 1.5 * Math.sin(th * 0.5);
+  // The whale's loop: tilted and bobbing, around the hole.
+  const WHALE_OMEGA = 0.12, INTRO_SECONDS = 9;
+  function orbitPoint(th) {
+    const R = 11 + 1.5 * Math.sin(th * 0.5);
     const x = R * Math.cos(th), z = R * Math.sin(th), y = 2.2 * Math.sin(th * 1.7);
     const tilt = 0.35, c = Math.cos(tilt), s = Math.sin(tilt);
     return [x, y * c - z * s, y * s + z * c];
   }
+  const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const add3 = (a, b, k = 1) => [a[0] + k * b[0], a[1] + k * b[1], a[2] + k * b[2]];
 
-  function renderWhale(cam, w, h, t) {
+  // The opening: the whale starts just in front of the camera, its eyes in the middle of
+  // the view, facing right. It swims off to the right and curves into the loop on the
+  // hole's right-hand side, heading away from the camera, so it keeps moving right.
+  function beginIntro(cam, now) {
+    const right = cam.rot.slice(0, 3), fwd = cam.rot.slice(6, 9);
+    // The eyes sit 2.2 units ahead of the model's centre and 0.2 above it.
+    const eyes = add3(cam.pos, fwd, 2.8);
+    const p0 = add3(add3(eyes, right, -2.2), [0, -0.2, 0]);
+    let thJoin = 0, best = -1e9;
+    for (let i = 0; i < 360; i++) {
+      const th = i * Math.PI / 180, v = dot3(orbitPoint(th), right);
+      if (v > best) { best = v; thJoin = th; }
+    }
+    const tangent = add3(orbitPoint(thJoin + 0.001), orbitPoint(thJoin), -1).map((v) => v / 0.001);
+    const dir = dot3(tangent, fwd) > 0 ? 1 : -1;
+    whale.intro = {
+      start: now, dir, thJoin,
+      p0, v0: right.map((v) => v * 0.5),
+      p1: orbitPoint(thJoin), v1: tangent.map((v) => v * dir * WHALE_OMEGA),
+    };
+  }
+
+  const introActive = (now) => !!whale.intro && now - whale.intro.start < INTRO_SECONDS;
+
+  function whalePosition(now) {
+    const w = whale.intro, t = now - w.start, T = INTRO_SECONDS;
+    if (t < T) {
+      // Hermite curve from the close-up to the loop, matching speed and heading at both ends.
+      const u = Math.max(t, 0) / T, u2 = u * u, u3 = u2 * u;
+      const h00 = 2 * u3 - 3 * u2 + 1, h10 = u3 - 2 * u2 + u, h01 = -2 * u3 + 3 * u2, h11 = u3 - u2;
+      return [0, 1, 2].map((k) => h00 * w.p0[k] + h10 * T * w.v0[k] + h01 * w.p1[k] + h11 * T * w.v1[k]);
+    }
+    return orbitPoint(w.thJoin + w.dir * WHALE_OMEGA * (t - T));
+  }
+
+  function renderWhale(cam, w, h, now) {
     if (whale.state !== 'ready') return false;
     if (whale.canvas.width !== w || whale.canvas.height !== h) whale.renderer.setSize(w, h, false);
-    const p = whalePath(t), ahead = whalePath(t + 0.4);
+    if (!whale.intro) beginIntro(cam, now);
+    const t = now - whale.intro.start;
+    const p = whalePosition(now), ahead = whalePosition(now + 0.2);
     whale.pos = p;
     whale.model.position.set(...p);
     whale.model.lookAt(...ahead);
     whale.model.rotateZ(0.25 * Math.sin(t * 0.9));   // a gentle roll
     whaleUniforms.uSwim.value = t;
     whaleUniforms.uMouth.value = mouthOpening(t);
+
+    // Rim light from the disk, strongest when the disk is behind the whale as we see it,
+    // and fading with distance from the hole like the disk light itself.
+    const d = Math.hypot(...p);
+    const toHole = p.map((v) => -v / d);
+    const fromCam = add3(p, cam.pos, -1), fc = Math.hypot(...fromCam);
+    const behind = Math.max(dot3(toHole, fromCam) / fc, 0);
+    const rim = 2.2 * behind * Math.min(121 / (d * d), 1.5);
+    whaleUniforms.uRim.value.setRGB(1.0 * rim, 0.78 * rim, 0.55 * rim);
 
     // Match the ray tracer's camera: focal length 1.6 across the shorter side.
     const camera = whale.camera, minSide = Math.min(w, h);
@@ -1013,6 +1067,17 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     return true;
   }
 
+  // Open on the close-up: a set camera, and the opening starts once the whale has loaded.
+  function startWhaleScene() {
+    setDist(24);
+    state.incl = 8;
+    $('incl').value = 8;
+    $('inclOut').textContent = sliders.incl(8);
+    whale.intro = null;
+    loadWhale();
+  }
+  $('replayIntro').addEventListener('click', startWhaleScene);
+
   function setMode(mode) {
     state.mode = mode;
     const isBinary = mode === 'binary';
@@ -1021,7 +1086,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     $('starControls').hidden = mode !== 'star';
     $('spinRow').hidden = isBinary;
     $('whaleControls').hidden = mode !== 'whale';
-    if (mode === 'whale') loadWhale();
+    if (mode === 'whale') startWhaleScene();
     // The star system is wider than the others, so step back to see all of it.
     if (mode === 'star' && state.dist < 42) setDist(42);
     resetBinary();
@@ -1176,7 +1241,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       starSys.phase += Math.sqrt(g.M / g.a ** 3) * dt * state.speed * TIME_SCALE * STAR_ORBIT_SPEEDUP;
     }
     const hs = holes();
-    if (state.spin && !dragging()) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
+    // Hold the camera still during the whale's opening shot.
+    if (state.spin && !dragging() && !(state.mode === 'whale' && introActive(simTime))) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
 
     const cam = cameraBasis();
