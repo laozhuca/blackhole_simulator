@@ -194,6 +194,12 @@ vec3 starfield(vec3 d) {
   return col;
 }
 
+// Novikov-Thorne-like temperature profile: zero at the inner edge, peaking just outside it.
+float diskTemp(float r) {
+  float x = uDiskIn / max(r, uDiskIn);
+  return pow(x, 0.75) * pow(max(1.0 - sqrt(x), 0.0), 0.25) / 0.488 * 5200.0;
+}
+
 // Emission from the thin disk where the ray crosses y = 0 at radius r.
 vec4 diskSample(vec3 hit, vec3 rayDir) {
   vec3 p = hit - uDiskCenter;
@@ -211,10 +217,7 @@ vec4 diskSample(vec3 hit, vec3 rayDir) {
   float gravShift = sqrt(max(1.0 - potential, 0.0));
   float g = mix(1.0, doppler * gravShift, uDoppler);
 
-  // Novikov-Thorne-like temperature profile: zero at the inner edge, peaking just outside it.
-  float x = uDiskIn / r;
-  float temp = pow(x, 0.75) * pow(max(1.0 - sqrt(x), 0.0), 0.25);
-  temp = temp / 0.488 * 5200.0;
+  float temp = diskTemp(r);
 
   // Turbulent structure that shears with the orbital angular speed.
   float phi = atan(p.z, p.x);
@@ -223,7 +226,7 @@ vec4 diskSample(vec3 hit, vec3 rayDir) {
   vec3 q = vec3(cos(swirl) * r, sin(swirl) * r, r * 0.6);
   float turb = fbm(q * 1.2) * 0.75 + fbm(vec3(r * 3.0, swirl * 2.0, uTime * 0.05)) * 0.5;
 
-  float edge = smoothstep(uDiskIn, uDiskIn + 0.6, r) * smoothstep(uDiskOut, uDiskOut - 3.0, r);
+  float edge = smoothstep(uDiskIn, uDiskIn + 0.6, r) * smoothstep(uDiskOut, uDiskOut - min(3.0, 0.3 * (uDiskOut - uDiskIn)), r);
   float intensity = temp / 5200.0;
   intensity = intensity * intensity * (0.15 + turb * turb * 1.4) * edge;
 
@@ -272,8 +275,10 @@ vec3 starSurface(vec3 n, vec3 rayDir) {
   return blackbody(temp) * limb * gran * 0.42;
 }
 
-// Glowing gas in the stream from the inner Lagrange point to the disk, ending in a hot spot.
-float streamDensity(vec3 p) {
+// Gas in the stream from the inner Lagrange point to the disk. Returns the density and how
+// far along the stream the point is (0 at L1, 1 where it has merged into the disk).
+// The stream lands on the rim at point 5, the hot spot, then flows on with the disk.
+vec2 streamDensity(vec3 p) {
   float best = 1e4, bestS = 0.0;
   for (int k = 0; k < 7; k++) {
     vec3 a = uStream[k], b = uStream[k + 1];
@@ -283,9 +288,11 @@ float streamDensity(vec3 p) {
     float d2 = dot(q, q);
     if (d2 < best) { best = d2; bestS = (float(k) + t) / 7.0; }
   }
-  float w = mix(0.45, 0.28, bestS);
-  float spot = exp(-dot(p - uStream[7], p - uStream[7]) / 0.15);
-  return exp(-best / (w * w)) * (0.5 + bestS) + spot * 1.2;
+  // Narrow as it falls, then spreading out as it merges into the disk.
+  float w = bestS < 0.7 ? mix(0.45, 0.3, bestS / 0.7) : mix(0.3, 0.7, (bestS - 0.7) / 0.3);
+  float fade = 1.0 - smoothstep(0.75, 1.0, bestS);
+  float rho = exp(-best / (w * w)) * mix(0.5, 1.2, min(bestS / 0.7, 1.0)) * fade;
+  return vec2(rho, bestS);
 }
 
 void main() {
@@ -329,9 +336,17 @@ void main() {
     }
 
     if (uStreamReach > 0.0 && abs(pos.y) < 1.2 && rDisk < uStreamReach + 1.5) {
-      float rho = streamDensity(pos) * (0.8 + 0.4 * noise(pos * 2.0 + uTime * 0.3));
-      col += trans * blackbody(7500.0) * rho * dt * 0.45 * uBright;
-      trans *= exp(-rho * dt * 0.5);
+      vec2 st = streamDensity(pos);
+      float rho = st.x * (0.8 + 0.4 * noise(pos * 2.0 + uTime * 0.3));
+      // The stream shares the disk's colour at each radius. The shock where it hits the rim
+      // heats the gas there above the disk around it.
+      vec3 sp = uStream[5] - pos;
+      float spot = exp(-dot(sp, sp) / 0.3);
+      float rs = clamp(length((pos - uDiskCenter).xz), uDiskIn, uDiskOut);
+      float temp = diskTemp(rs) * (1.0 + 0.45 * spot);
+      float glow = temp / 5200.0;
+      col += trans * blackbody(temp) * glow * glow * (rho + spot * 0.9) * dt * 0.7 * uBright;
+      trans *= exp(-rho * dt * 0.6);
     }
 
     vec3 acc = (holeAccel(pos, dir, uHoleA) + holeAccel(pos, dir, uHoleB)) * uLensing;
@@ -530,10 +545,12 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     const w = [-s, 0, c];         // the direction the orbit moves in
     // The stream falls from L1 and the Coriolis force swings it forward, onto the disk's rim.
     const stream = [];
+    const rim = g.diskOut * 0.85;
     for (let i = 0; i < 8; i++) {
-      const t = i / 7;
-      const r = g.l1 + (g.diskOut * 0.95 - g.l1) * Math.pow(t, 0.75);
-      const ang = 0.95 * Math.pow(t, 1.4);
+      // Points 0-5 fall from L1 to the hot spot on the rim; 6-7 carry on round with the disk.
+      const t = Math.min(i / 5, 1);
+      const r = i <= 5 ? g.l1 + (rim - g.l1) * Math.pow(t, 0.75) : rim * (1 - 0.04 * (i - 5));
+      const ang = i <= 5 ? 0.95 * Math.pow(t, 1.4) : 0.95 + 0.3 * (i - 5);
       const ca = Math.cos(ang), sa = Math.sin(ang);
       stream.push(hole[0] + r * (ca * u[0] + sa * w[0]), 0, hole[2] + r * (ca * u[2] + sa * w[2]));
     }
