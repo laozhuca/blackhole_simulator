@@ -338,13 +338,16 @@ void main() {
     if (uStreamReach > 0.0 && abs(pos.y) < 1.2 && rDisk < uStreamReach + 1.5) {
       vec2 st = streamDensity(pos);
       float rho = st.x * (0.8 + 0.4 * noise(pos * 2.0 + uTime * 0.3));
-      // The stream shares the disk's colour at each radius. The shock where it hits the rim
-      // heats the gas there above the disk around it.
+      // The gas leaves at the temperature of the star's tip (its cooler, gravity-darkened
+      // side), cools as it expands on the way down to the disk's colour at that radius,
+      // and is heated again by the shock where it hits the rim.
       vec3 sp = uStream[5] - pos;
       float spot = exp(-dot(sp, sp) / 0.3);
       float rs = clamp(length((pos - uDiskCenter).xz), uDiskIn, uDiskOut);
-      float temp = diskTemp(rs) * (1.0 + 0.45 * spot);
-      float glow = temp / 5200.0;
+      float temp = mix(uStarTemp * 0.78, diskTemp(rs), smoothstep(0.0, 0.45, st.y));
+      temp *= 1.0 + 0.45 * spot;
+      // Capped, so the thin, hot gas near the star does not outshine the disk.
+      float glow = min(temp / 5200.0, 1.3);
       col += trans * blackbody(temp) * glow * glow * (rho + spot * 0.9) * dt * 0.7 * uBright;
       trans *= exp(-rho * dt * 0.6);
     }
