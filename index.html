@@ -1483,8 +1483,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     // Pull the camera back to take in the giant whale.
     if (state.mode === 'whale' && whale.swallow && state.dist < 110)
       setDist(state.dist + (110 - state.dist) * (1 - Math.exp(-dt / 1.5)));
-    // Hold the camera still while the giant whale hunts, so its approach stays framed.
-    if (state.spin && !dragging() && !(state.mode === 'whale' && whale.swallow)) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
+    if (state.spin && !dragging()) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
 
     const cam = cameraBasis();
