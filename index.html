@@ -911,7 +911,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     }
   }
 
-  const whaleUniforms = { uSwim: { value: 0 }, uMouth: { value: 0 }, uRim: { value: null } };
+  const whaleUniforms = { uSwim: { value: 0 }, uMouth: { value: 0 }, uRim: { value: null },
+                          uDiskGlow: { value: null }, uHoleDir: { value: null } };
 
   // The model has no skeleton or animation, so it is posed in the vertex shader. In model
   // space it is 1.9 long along z (head at +z), the side fins reach x = +-0.45 at z 0-0.4,
@@ -955,40 +956,27 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     // distance. A whisper of cool starlight keeps the shadowed side from going fully black.
     whale.diskLight = new THREE.PointLight(0xffc690, 300, 0, 2);
     whale.scene.add(whale.diskLight);
-    whale.scene.add(new THREE.AmbientLight(0x2a3a55, 0.14));
+    whale.scene.add(new THREE.AmbientLight(0x2a3a55, 0.05));
 
-    // Silver is a mirror: it looks grey unless it has something to reflect. Give it a dim
-    // surround: a cool grey glow of space, and a warm band of disk light along the
-    // disk's plane, so it catches bright highlights against darker cool reflections.
-    const envScene = new THREE.Scene();
-    const sky = new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), new THREE.ShaderMaterial({
-      side: THREE.BackSide,
-      vertexShader: 'varying vec3 vDir; void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-      fragmentShader: `varying vec3 vDir;
-        void main() {
-          float up = vDir.y * 0.5 + 0.5;
-          vec3 c = mix(vec3(0.05, 0.06, 0.09), vec3(0.20, 0.20, 0.25), up);
-          c += vec3(2.2, 1.7, 1.1) * exp(-vDir.y * vDir.y / 0.006);
-          gl_FragColor = vec4(c, 1.0);
-        }`,
-    }));
-    envScene.add(sky);
-    const pmrem = new THREE.PMREMGenerator(whale.renderer);
-    whale.scene.environment = pmrem.fromScene(envScene, 0.02).texture;
-    pmrem.dispose();
+    // Silver is a mirror, and the only bright thing for it to mirror is the disk. The
+    // material shader adds a reflection of the disk where a surface reflects toward the hole.
     whaleUniforms.uRim.value = new THREE.Color(0, 0, 0);
+    whaleUniforms.uDiskGlow.value = new THREE.Color(0, 0, 0);
+    whaleUniforms.uHoleDir.value = new THREE.Vector3(0, 0, -1);
 
     model.traverse((o) => {
       if (!o.isMesh) return;
       const m = o.material;
-      // Polished metal, reflecting the surround above; it gives off no light of its own.
-      m.metalness = 0.9;
-      m.roughness = 0.24;
-      m.envMapIntensity = 0.9;
+      // Polished metal, but not fully, so the side facing the hole also takes diffuse light.
+      // It gives off no light of its own.
+      m.metalness = 0.6;
+      m.roughness = 0.3;
       m.onBeforeCompile = (shader) => {
         shader.uniforms.uSwim = whaleUniforms.uSwim;
         shader.uniforms.uMouth = whaleUniforms.uMouth;
         shader.uniforms.uRim = whaleUniforms.uRim;
+        shader.uniforms.uDiskGlow = whaleUniforms.uDiskGlow;
+        shader.uniforms.uHoleDir = whaleUniforms.uHoleDir;
         shader.vertexShader = 'uniform float uSwim;\nuniform float uMouth;\n' + shader.vertexShader.replace(
           '#include <begin_vertex>', '#include <begin_vertex>\n' + WHALE_POSE);
         // When the bright disk is behind the whale, its light wraps round the outline.
@@ -1003,9 +991,15 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
            vec3 tone = mix(vec3(0.28, 0.48, 1.0), vec3(1.0, 0.45, 0.95), magenta);
            // Blue areas take the tone a little more strongly, so the blue holds against the warm light.
            diffuseColor.rgb = silver * mix(vec3(1.0), tone, mix(0.65, 0.5, magenta));`);
-        shader.fragmentShader = 'uniform vec3 uRim;\n' + shader.fragmentShader.replace(
+        shader.fragmentShader = 'uniform vec3 uRim;\nuniform vec3 uDiskGlow;\nuniform vec3 uHoleDir;\n' + shader.fragmentShader.replace(
           '#include <lights_fragment_end>',
           `#include <lights_fragment_end>
+           // The disk's reflection: bright where the surface mirrors the view toward the hole,
+           // with a broad shoulder because the disk is large. uHoleDir is in view space.
+           vec3 mirrored = reflect(-normalize(vViewPosition), normal);
+           float toward = max(dot(mirrored, uHoleDir), 0.0);
+           reflectedLight.indirectSpecular += uDiskGlow * material.specularColor *
+             (pow(toward, 8.0) * 1.6 + pow(toward, 2.0) * 0.35);
            reflectedLight.directDiffuse += uRim * diffuseColor.rgb *
              pow(1.0 - saturate(abs(dot(normal, normalize(vViewPosition)))), 3.0);`);
       };
@@ -1085,6 +1079,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     const behind = Math.max(dot3(toHole, fromCam) / fc, 0);
     const rim = 2.2 * behind * Math.min(121 / (d * d), 1.5);
     whaleUniforms.uRim.value.setRGB(1.0 * rim, 0.78 * rim, 0.55 * rim);
+    const glow = Math.min(121 / (d * d), 1.5);
+    whaleUniforms.uDiskGlow.value.setRGB(1.0 * glow, 0.8 * glow, 0.58 * glow);
 
     // Match the ray tracer's camera: focal length 1.6 across the shorter side.
     const camera = whale.camera, minSide = Math.min(w, h);
@@ -1094,6 +1090,9 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     camera.up.set(cam.rot[3], cam.rot[4], cam.rot[5]);
     camera.lookAt(0, 0, 0);
     camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
+    // The direction from the whale to the hole, in the camera's view space.
+    whaleUniforms.uHoleDir.value.set(-p[0], -p[1], -p[2]).normalize().transformDirection(camera.matrixWorldInverse);
     whale.renderer.render(whale.scene, camera);
     return true;
   }
