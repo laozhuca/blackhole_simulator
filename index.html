@@ -97,7 +97,7 @@
     <div class="row" id="spinRow"><label for="holeSpin">Hole spin</label><output id="holeSpinOut"></output>
       <input id="holeSpin" type="range" min="0" max="0.99" step="0.01" value="0.9"></div>
     <div class="row"><label for="dist">Camera distance</label><output id="distOut"></output>
-      <input id="dist" type="range" min="6" max="100" step="0.1" value="24"></div>
+      <input id="dist" type="range" min="6" max="120" step="0.1" value="24"></div>
     <div class="row"><label for="incl">Camera inclination</label><output id="inclOut"></output>
       <input id="incl" type="range" min="-89" max="89" step="0.5" value="8"></div>
     <div class="row"><label for="diskOuter">Disk outer radius</label><output id="diskOuterOut"></output>
@@ -1094,83 +1094,95 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   const WHALE_SIZES = [...Array.from({ length: 16 }, (_, i) => +(0.5 + 0.1 * i).toFixed(1)), 5];
   const GIANT = 5;
 
-  // The swallow, in seconds from when 5x is picked. It grows and circles well clear of the
-  // hole until CIRCLE_END, turns onto a straight line through the hole by RUN_START, swims
-  // straight down it, opening its mouth as it nears the hole, closes it over the hole at
-  // GULP, then swims on with the hole glowing inside. The hole stays real, bending light,
-  // until the gulp.
-  const GROW = 2.5, CIRCLE_END = 10, RUN_START = 14, GULP = 18, SETTLE = 6;
-  const BIG_R = 26;
-  // The mouth is 0.95 x 3.2 x 5 = 15.2 ahead of the whale's centre. On the straight run it
-  // goes from 20 short of the hole to 5 past it (the hole well inside), at constant speed.
-  const MOUTH = 15.2, RUN_FROM = 20, RUN_TO = -5;
-  const RUN_SPEED = (RUN_FROM - RUN_TO) / (GULP - RUN_START);
+  // The swallow. During it the whale is steered, not put on a fixed path: it has a
+  // position, a heading and a speed, swims forward, and can only turn along a circle of
+  // TURN_R or wider, so it never pivots on the spot. Each frame it steers toward the goal
+  // of its current phase:
+  //   circle  - spiral out onto a wide circle round the hole, for at least CIRCLE_MIN;
+  //   out     - leave the circle and swim straight on, away from the hole, to get room to
+  //             turn (circling this close, it could not point at the hole);
+  //   aim     - sweep round until it points at the hole, then swim straight at it, opening
+  //             its mouth once lined up, and shut it over the hole (the gulp);
+  //   after   - carry on straight, then curve back onto the circle.
+  // The hole stays real, bending light, until the gulp.
+  const BIG_R = 24, TURN_R = 15, CIRCLE_MIN = 10, OUT_DIST = 36, AFTER_STRAIGHT = 4;
+  const CRUISE = 4, RUN_SPEED = 5;
+  const unit = (v) => { const l = Math.hypot(...v) || 1; return v.map((x) => x / l); };
   function bigOrbit(th) {
     const x = BIG_R * Math.cos(th), z = BIG_R * Math.sin(th), y = 2 * Math.sin(th * 1.3);
     const tilt = 0.35, c = Math.cos(tilt), s = Math.sin(tilt);
     return [x, y * c - z * s, y * s + z * c];
   }
-  const bigTangent = (th) => add3(bigOrbit(th + 0.001), bigOrbit(th), -1).map((v) => v / 0.001);
   // The loop angle of a point, undoing the tilt.
   function loopAngle(p) {
     const tilt = 0.35, c = Math.cos(tilt), s = Math.sin(tilt);
     return Math.atan2(-p[1] * s + p[2] * c, p[0]);
   }
-  function hermite(p0, v0, p1, v1, T, t) {
-    const u = Math.min(Math.max(t / T, 0), 1), u2 = u * u, u3 = u2 * u;
-    const h00 = 2 * u3 - 3 * u2 + 1, h10 = u3 - 2 * u2 + u, h01 = -2 * u3 + 3 * u2, h11 = u3 - u2;
-    return [0, 1, 2].map((k) => h00 * p0[k] + h10 * T * v0[k] + h01 * p1[k] + h11 * T * v1[k]);
+  // Turn unit vector a toward unit vector b by at most maxAngle radians.
+  function turnToward(a, b, maxAngle) {
+    const cosA = Math.min(Math.max(dot3(a, b), -1), 1), ang = Math.acos(cosA);
+    if (ang <= maxAngle) return b;
+    let axis = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    if (Math.hypot(...axis) < 1e-6) axis = [0, 1, 0];
+    axis = unit(axis);
+    // Rodrigues' rotation of a about axis by maxAngle.
+    const c = Math.cos(maxAngle), s = Math.sin(maxAngle), k = dot3(axis, a) * (1 - c);
+    const cr = [axis[1] * a[2] - axis[2] * a[1], axis[2] * a[0] - axis[0] * a[2], axis[0] * a[1] - axis[1] * a[0]];
+    return unit([0, 1, 2].map((i) => a[i] * c + cr[i] * s + axis[i] * k));
   }
-  const unit = (v) => { const l = Math.hypot(...v) || 1; return v.map((x) => x / l); };
+  const mouthReach = () => 0.95 * 3.2 * whale.size;   // centre to mouth tip
 
-  function beginSwallow(now) {
-    const dir = whale.intro ? whale.intro.dir : 1;
-    const th0 = loopAngle(whale.pos);
-    const ws = { start: now, dir, th0 };
-    // Where it leaves the circle.
-    const thB = th0 + dir * WHALE_OMEGA * CIRCLE_END;
-    ws.pB = bigOrbit(thB);
-    ws.vB = bigTangent(thB).map((v) => v * dir * WHALE_OMEGA);
-    // The straight run goes across the view, through the hole, starting on the side the
-    // whale is already on, so we watch it side-on.
-    const right = whale.lastCam.rot.slice(0, 3);
-    ws.line = dot3(ws.pB, right) > 0 ? right.map((v) => -v) : right;
-    ws.runStart = ws.line.map((v) => -v * (MOUTH + RUN_FROM));
-    ws.runVel = ws.line.map((v) => v * RUN_SPEED);
-    // Afterwards it swims on and curves back onto the circle.
-    const runEnd = ws.line.map((v) => -v * (MOUTH + RUN_TO));
-    ws.thC = loopAngle(add3(runEnd, ws.line, 24));
-    ws.pC = bigOrbit(ws.thC);
-    ws.vC = bigTangent(ws.thC).map((v) => v * dir * WHALE_OMEGA);
-    whale.swallow = ws;
+  function beginSwallow(now, pos, ahead) {
+    whale.swallow = {
+      start: now, phase: 'circle', phaseStart: now, dir: whale.intro ? whale.intro.dir : 1,
+      pos: pos.slice(), head: unit(add3(ahead, pos, -1)), speed: CRUISE, outFrom: null, gulpAt: null,
+      closing: false,   // lined up and heading in for the hole
+    };
     whale.holeGone = false;
   }
 
-  // How far the mouth is short of the hole on the straight run (negative once past it).
-  const mouthToHole = (st) => RUN_FROM - RUN_SPEED * (st - RUN_START);
+  // How far the mouth is short of the hole along the heading (negative once past it), and how
+  // far off-line the hole is.
+  function mouthToHole(ws) {
+    const mouth = add3(ws.pos, ws.head, mouthReach());
+    const along = -dot3(mouth, ws.head);
+    const off = Math.hypot(...add3(mouth.map((v) => -v), ws.head, -along));
+    return { along, off };
+  }
+
+  function steerSwallow(now, dt) {
+    const ws = whale.swallow;
+    let goal = ws.head, speed = CRUISE;
+    const d = mouthToHole(ws);
+    if (ws.phase === 'circle') {
+      // Chase a point half a radian ahead on the circle.
+      goal = unit(add3(bigOrbit(loopAngle(ws.pos) + ws.dir * 0.5), ws.pos, -1));
+      if (now - ws.start > CIRCLE_MIN && Math.abs(Math.hypot(...ws.pos) - BIG_R) < 3) {
+        ws.phase = 'out'; ws.phaseStart = now; ws.outFrom = ws.pos.slice();
+      }
+    } else if (ws.phase === 'out') {
+      if (Math.hypot(...add3(ws.pos, ws.outFrom, -1)) > OUT_DIST) { ws.phase = 'aim'; ws.phaseStart = now; }
+    } else if (ws.phase === 'aim') {
+      // Point at the hole until the mouth is right on it, then hold the line.
+      if (!ws.closing || d.along > 2) goal = unit(ws.pos.map((v) => -v));
+      const lined = Math.acos(Math.min(dot3(goal, ws.head), 1)) < 0.05;
+      if (lined && d.along > 0) ws.closing = true;
+      speed = ws.closing ? RUN_SPEED : CRUISE;
+      if (ws.closing && d.along <= -5) { ws.phase = 'after'; ws.phaseStart = now; ws.gulpAt = now; whale.holeGone = true; }
+    } else if (now - ws.phaseStart > AFTER_STRAIGHT) {
+      goal = unit(add3(bigOrbit(loopAngle(ws.pos) + ws.dir * 0.5), ws.pos, -1));
+    }
+    // Ease the speed, and turn no tighter than TURN_R.
+    ws.speed += (speed - ws.speed) * (1 - Math.exp(-dt / 1.5));
+    ws.head = turnToward(ws.head, goal, ws.speed / TURN_R * dt);
+    ws.pos = add3(ws.pos, ws.head, ws.speed * dt);
+  }
 
   function endSwallow() {
     whale.swallow = null;
     whale.holeGone = false;
     whaleUniforms.uInner.value = 0;
     if (whale.diskLight) whale.diskLight.intensity = 300;
-  }
-
-  function swallowPosition(now) {
-    const ws = whale.swallow, t = now - ws.start;
-    if (t < CIRCLE_END) {
-      // Ease from its loop out onto the big circle while it grows.
-      const thLoop = whale.intro.thJoin + whale.intro.dir * WHALE_OMEGA * (now - whale.intro.start - INTRO_SECONDS);
-      const from = introActive(now) ? whalePosition(now) : orbitPoint(thLoop);
-      const to = bigOrbit(ws.th0 + ws.dir * WHALE_OMEGA * t);
-      const k = Math.min(t / GROW, 1), e = k * k * (3 - 2 * k);
-      return add3(from, add3(to, from, -1), e);
-    }
-    if (t < RUN_START) return hermite(ws.pB, ws.vB, ws.runStart, ws.runVel, RUN_START - CIRCLE_END, t - CIRCLE_END);
-    if (t < GULP) return add3(ws.runStart, ws.runVel, t - RUN_START);
-    const runEnd = add3(ws.runStart, ws.runVel, GULP - RUN_START);
-    if (t < GULP + SETTLE) return hermite(runEnd, ws.runVel, ws.pC, ws.vC, SETTLE, t - GULP);
-    return bigOrbit(ws.thC + ws.dir * WHALE_OMEGA * (t - GULP - SETTLE));
   }
 
   function setWhaleStatus(text) {
@@ -1190,9 +1202,15 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.size += (whale.targetSize - whale.size) * (1 - Math.exp(-step / (whale.swallow ? 0.8 : 0.5)));
     whale.model.children[0].scale.setScalar(3.2 * whale.size);
 
-    const ws = whale.swallow, st = ws ? now - ws.start : 0;
-    const pos = (n) => (ws ? swallowPosition(n) : whalePosition(n));
-    const p = pos(now), ahead = pos(now + 0.2);
+    const ws = whale.swallow;
+    let p, ahead;
+    if (ws) {
+      // Small steps, so the turn limit holds however long the frame.
+      for (let left = step; left > 1e-6; left -= 0.05) steerSwallow(now - left, Math.min(0.05, left));
+      p = ws.pos; ahead = add3(ws.pos, ws.head);
+    } else {
+      p = whalePosition(now); ahead = whalePosition(now + 0.2);
+    }
     whale.pos = p;
     whale.model.position.set(...p);
     whale.model.lookAt(...ahead);
@@ -1200,21 +1218,26 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whaleUniforms.uSwim.value = t;
     let mouth = mouthOpening(t);
     if (ws) {
-      // On the straight run the mouth starts opening 11 units short of the hole and is wide
-      // by 5 short; it closes once the hole is well inside, finishing at the gulp.
-      const dm = mouthToHole(st);
-      const open = st < RUN_START ? 0 : Math.min(Math.max((11 - dm) / 6, 0), 1);
-      const shut = st < RUN_START ? 0 : Math.min(Math.max((-3.2 - dm) / 1.8, 0), 1);
-      mouth = st < GULP + 1 ? open * (1 - shut) : mouthOpening(t);
-      if (!whale.holeGone && st >= GULP) whale.holeGone = true;
-      setWhaleStatus(st < CIRCLE_END ? 'The giant whale circles the black hole…'
-        : st < RUN_START ? 'It takes aim…'
-        : st < GULP && dm > 11 ? 'It swims straight at the hole…'
-        : st < GULP ? 'It opens wide…'
+      // Once lined up with the hole, the mouth starts opening 11 units short of it and is
+      // wide by 5 short; it closes once the hole is well inside, finishing at the gulp.
+      const d = mouthToHole(ws), lined = ws.closing && d.off < 3;
+      if (ws.phase === 'aim') {
+        const open = lined ? Math.min(Math.max((11 - d.along) / 6, 0), 1) : 0;
+        const shut = Math.min(Math.max((-3.2 - d.along) / 1.8, 0), 1);
+        mouth = open * (1 - shut);
+      } else if (ws.phase === 'after' && now - ws.gulpAt < 1) {
+        mouth = 0;
+      }
+      setWhaleStatus(ws.phase === 'circle' ? 'The giant whale circles the black hole…'
+        : ws.phase === 'out' ? 'It swims out to make room to turn…'
+        : ws.phase === 'aim' && !lined ? 'It turns toward the hole…'
+        : ws.phase === 'aim' && d.along > 11 ? 'It swims straight at the hole…'
+        : ws.phase === 'aim' ? 'It opens wide…'
         : 'It swallowed the black hole! Move the slider off 5× to bring the hole back.');
       // The hole's light goes out as it is swallowed, and glows on inside the whale.
-      const inner = Math.min(Math.max((st - GULP) / 1.5, 0), 1);
-      whaleUniforms.uInner.value = inner * (0.85 + 0.15 * Math.sin(st * 2.2));
+      const since = ws.gulpAt === null ? -1 : now - ws.gulpAt;
+      const inner = Math.min(Math.max(since / 1.5, 0), 1);
+      whaleUniforms.uInner.value = inner * (0.85 + 0.15 * Math.sin(since * 2.2));
       whale.diskLight.intensity = 300 * (1 - inner);
     }
     whaleUniforms.uMouth.value = mouth;
@@ -1271,7 +1294,10 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   }
   $('whaleSize').addEventListener('input', () => {
     const size = syncWhaleSize();
-    if (size === GIANT && !whale.swallow && whale.state === 'ready') beginSwallow(whale.lastNow ?? simTime);
+    if (size === GIANT && !whale.swallow && whale.state === 'ready' && whale.intro) {
+      const n = whale.lastNow ?? simTime;
+      beginSwallow(n, whalePosition(n), whalePosition(n + 0.2));
+    }
     else if (size !== GIANT && whale.swallow) {
       // Back below 5x: the hole returns and the opening plays again.
       endSwallow();
@@ -1341,7 +1367,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     return Math.hypot(a.x - b.x, a.y - b.y);
   };
   function setDist(d) {
-    state.dist = Math.max(6, Math.min(100, d));
+    state.dist = Math.max(6, Math.min(120, d));
     $('dist').value = state.dist;
     $('distOut').textContent = sliders.dist(state.dist);
   }
@@ -1446,8 +1472,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     }
     const hs = holes();
     // Pull the camera back to take in the giant whale.
-    if (state.mode === 'whale' && whale.swallow && state.dist < 100)
-      setDist(state.dist + (100 - state.dist) * (1 - Math.exp(-dt / 1.5)));
+    if (state.mode === 'whale' && whale.swallow && state.dist < 110)
+      setDist(state.dist + (110 - state.dist) * (1 - Math.exp(-dt / 1.5)));
     // Hold the camera still during the whale's opening shot.
     if (state.spin && !dragging() && !(state.mode === 'whale' && (introActive(simTime) || whale.swallow))) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
