@@ -1057,12 +1057,19 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   // The opening: the whale starts just in front of the camera, its eyes in the middle of
   // the view, facing right. It swims off to the right and curves into the loop on the
   // hole's right-hand side, heading away from the camera, so it keeps moving right.
-  function beginIntro(cam, now) {
+  // Where the close-up starts, in front of the camera as it is now. Recomputed each frame of
+  // the opening, so the shot follows the camera if auto-orbit is moving it.
+  function introStart(cam) {
     const right = cam.rot.slice(0, 3), fwd = cam.rot.slice(6, 9);
     // The eyes sit 2.2 units ahead of the model's centre and 0.2 above it, at 1x size.
     const sz = whale.size;
     const eyes = add3(cam.pos, fwd, 2.8 * Math.max(sz, 0.8));
-    const p0 = add3(add3(eyes, right, -2.2 * sz), [0, -0.2 * sz, 0]);
+    return { p0: add3(add3(eyes, right, -2.2 * sz), [0, -0.2 * sz, 0]), v0: right.map((v) => v * 0.5) };
+  }
+
+  function beginIntro(cam, now) {
+    const right = cam.rot.slice(0, 3), fwd = cam.rot.slice(6, 9);
+    const { p0, v0 } = introStart(cam);
     let thJoin = 0, best = -1e9;
     for (let i = 0; i < 360; i++) {
       const th = i * Math.PI / 180, v = dot3(orbitPoint(th), right);
@@ -1072,7 +1079,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     const dir = dot3(tangent, fwd) > 0 ? 1 : -1;
     whale.intro = {
       start: now, dir, thJoin,
-      p0, v0: right.map((v) => v * 0.5),
+      p0, v0,
       p1: orbitPoint(thJoin), v1: tangent.map((v) => v * dir * WHALE_OMEGA),
     };
   }
@@ -1196,6 +1203,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.lastCam = cam;
     if (whale.canvas.width !== w || whale.canvas.height !== h) whale.renderer.setSize(w, h, false);
     if (!whale.intro) beginIntro(cam, now);
+    else if (introActive(now)) Object.assign(whale.intro, introStart(cam));
     const t = now - whale.intro.start;
     const step = whale.lastNow === null ? 0 : Math.max(now - whale.lastNow, 0);
     whale.lastNow = now;
@@ -1475,8 +1483,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     // Pull the camera back to take in the giant whale.
     if (state.mode === 'whale' && whale.swallow && state.dist < 110)
       setDist(state.dist + (110 - state.dist) * (1 - Math.exp(-dt / 1.5)));
-    // Hold the camera still during the whale's opening shot.
-    if (state.spin && !dragging() && !(state.mode === 'whale' && (introActive(simTime) || whale.swallow))) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
+    // Hold the camera still while the giant whale hunts, so its approach stays framed.
+    if (state.spin && !dragging() && !(state.mode === 'whale' && whale.swallow)) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
 
     const cam = cameraBasis();
