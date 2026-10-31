@@ -958,8 +958,25 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.scene.add(whale.diskLight);
     whale.scene.add(new THREE.AmbientLight(0x2a3a55, 0.05));
 
-    // Silver is a mirror, and the only bright thing for it to mirror is the disk. The
-    // material shader adds a reflection of the disk where a surface reflects toward the hole.
+    // Silver is a mirror, and the brightest thing for it to mirror is the disk: the material
+    // shader adds a reflection of the disk where a surface reflects toward the hole. Under
+    // that, a dim surround (a cool grey glow of space and a warm band along the disk's
+    // plane) gives the metal its sheen everywhere, at well under the disk's strength.
+    const envScene = new THREE.Scene();
+    envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      vertexShader: 'varying vec3 vDir; void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: `varying vec3 vDir;
+        void main() {
+          float up = vDir.y * 0.5 + 0.5;
+          vec3 c = mix(vec3(0.05, 0.06, 0.09), vec3(0.20, 0.20, 0.25), up);
+          c += vec3(2.2, 1.7, 1.1) * exp(-vDir.y * vDir.y / 0.006);
+          gl_FragColor = vec4(c, 1.0);
+        }`,
+    })));
+    const pmrem = new THREE.PMREMGenerator(whale.renderer);
+    whale.scene.environment = pmrem.fromScene(envScene, 0.02).texture;
+    pmrem.dispose();
     whaleUniforms.uRim.value = new THREE.Color(0, 0, 0);
     whaleUniforms.uDiskGlow.value = new THREE.Color(0, 0, 0);
     whaleUniforms.uHoleDir.value = new THREE.Vector3(0, 0, -1);
@@ -971,6 +988,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       // It gives off no light of its own.
       m.metalness = 0.6;
       m.roughness = 0.3;
+      m.envMapIntensity = 0.4;   // the surround, at 40% of its earlier strength
       m.onBeforeCompile = (shader) => {
         shader.uniforms.uSwim = whaleUniforms.uSwim;
         shader.uniforms.uMouth = whaleUniforms.uMouth;
