@@ -134,6 +134,7 @@ uniform vec4  uStarShape;  // xyz unit axis toward the hole, w how far the star 
 uniform float uStarTemp;
 uniform vec3  uStream[8];  // gas stream from the star to the disk, as a polyline
 uniform float uStreamReach; // 0 when there is no stream
+uniform float uArmStrength; // tidal spiral arms in the disk; 0 when there is no star
 
 // Units: the final (or only) hole has rs = 1, so M = 0.5 and its photon sphere sits at r = 1.5.
 const int   MAX_STEPS = 400;
@@ -230,9 +231,22 @@ vec4 diskSample(vec3 hit, vec3 rayDir) {
   float g = mix(1.0, doppler * gravShift, uDoppler);
 
   float temp = diskTemp(r);
+  float phi = atan(p.z, p.x);
+
+  // The star's tides drive two spiral shocks through the outer disk. The pattern is fixed
+  // to the star and turns with the orbit while the gas streams through it. The arms trail:
+  // they wind back against the disk's spin going outward (pitch about 17 degrees). Shocked
+  // gas in the arms is compressed and heated; the gaps between them are thinner and dimmer.
+  float arm = 0.0, armZone = 0.0;
+  if (uArmStrength > 0.0) {
+    float phiStar = atan(-uStarShape.z, -uStarShape.x);
+    float a = phi - phiStar - 1.2 + 3.2 * log(r / uDiskOut);
+    armZone = smoothstep(uDiskIn, uDiskIn + 0.45 * (uDiskOut - uDiskIn), r) * uArmStrength;
+    arm = pow(0.5 + 0.5 * cos(2.0 * a), 5.0) * armZone;
+    temp *= 1.0 + 0.3 * arm;
+  }
 
   // Turbulent structure that shears with the orbital angular speed.
-  float phi = atan(p.z, p.x);
   float omega = v / r;
   float swirl = phi + uTime * omega * 4.0;
   vec3 q = vec3(cos(swirl) * r, sin(swirl) * r, r * 0.6);
@@ -241,6 +255,7 @@ vec4 diskSample(vec3 hit, vec3 rayDir) {
   float edge = smoothstep(uDiskIn, uDiskIn + 0.6, r) * smoothstep(uDiskOut, uDiskOut - min(3.0, 0.3 * (uDiskOut - uDiskIn)), r);
   float intensity = temp / 5200.0;
   intensity = intensity * intensity * (0.15 + turb * turb * 1.4) * edge;
+  intensity *= 1.0 - 0.55 * armZone + 2.6 * arm;
 
   vec3 col = blackbody(temp * g) * intensity * pow(g, 4.0) * uBright * 0.55;
   float alpha = clamp(intensity * 1.6 * (0.6 + turb), 0.0, 1.0);
@@ -453,7 +468,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   const loc = (p, n) => gl.getUniformLocation(p, n);
   const U = {};
   for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing', 'uHoleA', 'uHoleB', 'uMass',
-                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach'])
+                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach', 'uArmStrength'])
     U[n] = loc(traceProg, n);
 
   // Ray-trace into a low-resolution texture, then stretch it over the canvas.
@@ -595,6 +610,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       diskCenter: hole,
       star: [...star, g.radius], starShape: [-c, 0, -s, g.stretch], starTemp: g.temp,
       stream, streamReach: g.l1,
+      // A heavier star raises stronger tides, and stronger arms.
+      armStrength: 0.5 + 0.5 * Math.min(state.starMass, 1.5) / 1.5,
     };
   }
 
@@ -607,7 +624,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
 
   const NO_EXTRAS = {
     diskCenter: [0, 0, 0], star: [0, 0, 0, 0], starShape: [1, 0, 0, 1], starTemp: 5800,
-    stream: new Array(24).fill(0), streamReach: 0,
+    stream: new Array(24).fill(0), streamReach: 0, armStrength: 0,
   };
 
   function holes() {
@@ -853,6 +870,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     gl.uniform1f(U.uStarTemp, hs.starTemp);
     gl.uniform3fv(U.uStream, hs.stream);
     gl.uniform1f(U.uStreamReach, hs.streamReach);
+    gl.uniform1f(U.uArmStrength, hs.armStrength);
     gl.uniform4fv(U.uHoleA, hs.a);
     gl.uniform4fv(U.uHoleB, hs.b);
     gl.uniform1f(U.uMass, hs.mass);
