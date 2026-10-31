@@ -988,7 +988,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       // It gives off no light of its own.
       m.metalness = 0.6;
       m.roughness = 0.3;
-      m.envMapIntensity = 0.4;   // the surround, at 40% of its earlier strength
+      m.envMapIntensity = 0.2;   // the surround, at 20% of its original strength
       m.onBeforeCompile = (shader) => {
         shader.uniforms.uSwim = whaleUniforms.uSwim;
         shader.uniforms.uMouth = whaleUniforms.uMouth;
@@ -1008,7 +1008,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
            float magenta = clamp((neon.r - neon.g) / max(neon.b, 1e-3), 0.0, 1.0);
            vec3 tone = mix(vec3(0.18, 0.38, 1.0), vec3(1.0, 0.30, 0.95), magenta);
            // Blue areas take the tone a little more strongly, so the blue holds against the warm light.
-           diffuseColor.rgb = silver * mix(vec3(1.0), tone, mix(0.75, 0.65, magenta));`);
+           diffuseColor.rgb = silver * mix(vec3(1.0), tone, mix(0.96, 0.84, magenta));`);
         shader.fragmentShader = 'uniform vec3 uRim;\nuniform vec3 uDiskGlow;\nuniform vec3 uHoleDir;\n' + shader.fragmentShader.replace(
           '#include <lights_fragment_end>',
           `#include <lights_fragment_end>
