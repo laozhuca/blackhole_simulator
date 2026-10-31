@@ -1220,13 +1220,13 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     if (ws) {
       // Once lined up with the hole, the mouth starts opening 11 units short of it and is
       // wide by 5 short; it closes once the hole is well inside, finishing at the gulp.
+      // At 5x the mouth stays shut, opening only for the swallow itself.
       const d = mouthToHole(ws), lined = ws.closing && d.off < 3;
+      mouth = 0;
       if (ws.phase === 'aim') {
         const open = lined ? Math.min(Math.max((11 - d.along) / 6, 0), 1) : 0;
         const shut = Math.min(Math.max((-3.2 - d.along) / 1.8, 0), 1);
         mouth = open * (1 - shut);
-      } else if (ws.phase === 'after' && now - ws.gulpAt < 1) {
-        mouth = 0;
       }
       setWhaleStatus(ws.phase === 'circle' ? 'The giant whale circles the black hole…'
         : ws.phase === 'out' ? 'It swims out to make room to turn…'
