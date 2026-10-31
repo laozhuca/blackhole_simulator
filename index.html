@@ -962,9 +962,9 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       if (!o.isMesh) return;
       const m = o.material;
       // Fully metallic with nothing to reflect renders black, so make it less so; it gives
-      // off no light of its own.
-      m.metalness = 0.35;
-      m.roughness = 0.5;
+      // off no light of its own. Smooth enough for a silvery sheen.
+      m.metalness = 0.45;
+      m.roughness = 0.35;
       m.onBeforeCompile = (shader) => {
         shader.uniforms.uSwim = whaleUniforms.uSwim;
         shader.uniforms.uMouth = whaleUniforms.uMouth;
@@ -972,6 +972,15 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
         shader.vertexShader = 'uniform float uSwim;\nuniform float uMouth;\n' + shader.vertexShader.replace(
           '#include <begin_vertex>', '#include <begin_vertex>\n' + WHALE_POSE);
         // When the bright disk is behind the whale, its light wraps round the outline.
+        // Silver, with a faint blue and purple tone: keep the texture's light and dark detail,
+        // and only a fifth of its neon colour (magenta areas go purple, blue areas blue).
+        shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>',
+          `#include <map_fragment>
+           vec3 neon = diffuseColor.rgb;
+           float lum = dot(neon, vec3(0.299, 0.587, 0.114));
+           vec3 silver = vec3(0.80, 0.82, 0.86) * (0.55 + 0.6 * lum);
+           vec3 tone = neon / max(max(neon.r, max(neon.g, neon.b)), 1e-3);
+           diffuseColor.rgb = mix(silver, silver * tone, 0.22);`);
         shader.fragmentShader = 'uniform vec3 uRim;\n' + shader.fragmentShader.replace(
           '#include <lights_fragment_end>',
           `#include <lights_fragment_end>
