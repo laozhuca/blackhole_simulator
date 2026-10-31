@@ -200,6 +200,18 @@ float diskTemp(float r) {
   return pow(x, 0.75) * pow(max(1.0 - sqrt(x), 0.0), 0.25) / 0.488 * 5200.0;
 }
 
+// Glowing haze just above and below the disk, in the disk's colour at each radius,
+// fading out past its edges. It is what makes the disk glow into the space around it.
+vec3 diskHaze(vec3 pos) {
+  vec3 rel = pos - uDiskCenter;
+  float r = length(rel.xz);
+  float fade = smoothstep(uDiskIn * 0.85, uDiskIn + 0.6, r) * (1.0 - smoothstep(uDiskOut * 0.9, uDiskOut * 1.35, r));
+  if (fade <= 0.0) return vec3(0.0);
+  float temp = diskTemp(clamp(r, uDiskIn + 0.3, uDiskOut));
+  float glow = temp / 5200.0;
+  return blackbody(temp) * glow * glow * exp(-abs(rel.y) / 0.7) * fade;
+}
+
 // Emission from the thin disk where the ray crosses y = 0 at radius r.
 vec4 diskSample(vec3 hit, vec3 rayDir) {
   vec3 p = hit - uDiskCenter;
@@ -279,9 +291,9 @@ vec3 starSurface(vec3 n, vec3 rayDir) {
 }
 
 // Gas in the stream from the inner Lagrange point to the disk. Returns the density and how
-// far along the stream the point is (0 at L1, 1 where it has merged into the disk).
+// far along the stream the point is (0 at L1, 1 where it has merged into the disk), and its halo.
 // The stream lands on the rim at point 5, the hot spot, then flows on with the disk.
-vec2 streamDensity(vec3 p) {
+vec3 streamDensity(vec3 p) {
   float best = 1e4, bestS = 0.0;
   for (int k = 0; k < 7; k++) {
     vec3 a = uStream[k], b = uStream[k + 1];
@@ -295,7 +307,9 @@ vec2 streamDensity(vec3 p) {
   float w = bestS < 0.7 ? mix(0.45, 0.3, bestS / 0.7) : mix(0.3, 0.7, (bestS - 0.7) / 0.3);
   float fade = 1.0 - smoothstep(0.75, 1.0, bestS);
   float rho = exp(-best / (w * w)) * mix(0.5, 1.2, min(bestS / 0.7, 1.0)) * fade;
-  return vec2(rho, bestS);
+  // A wide, faint halo around the core, so the stream glows into the space around it.
+  float halo = exp(-best / (9.0 * w * w)) * fade;
+  return vec3(rho, bestS, halo);
 }
 
 void main() {
@@ -334,6 +348,9 @@ void main() {
     float rDisk = length(pos - uDiskCenter);
     if (abs(pos.y) < 1.0 && rDisk < max(uDiskOut, uStreamReach) + 2.0) dt = min(dt, 0.12);
 
+    if (abs(pos.y) < 3.0 && rDisk < uDiskOut * 1.4 + 1.0)
+      col += trans * diskHaze(pos) * dt * 0.04 * uBright;
+
     if (uStar.w > 0.0) {
       // Slow down near the star so rays do not step over its edge, and add its glow.
       float h = length(pos - uStar.xyz) - uStar.w * uStarShape.w;
@@ -342,8 +359,8 @@ void main() {
       if (hs < starMiss) { starMiss = hs; starMissTrans = trans; }
     }
 
-    if (uStreamReach > 0.0 && abs(pos.y) < 1.2 && rDisk < uStreamReach + 1.5) {
-      vec2 st = streamDensity(pos);
+    if (uStreamReach > 0.0 && abs(pos.y) < 2.5 && rDisk < uStreamReach + 2.5) {
+      vec3 st = streamDensity(pos);
       float rho = st.x * (0.8 + 0.4 * noise(pos * 2.0 + uTime * 0.3));
       // The gas leaves at the temperature of the star's tip (its cooler, gravity-darkened
       // side), cools as it expands on the way down to the disk's colour at that radius,
@@ -355,7 +372,7 @@ void main() {
       temp *= 1.0 + 0.45 * spot;
       // Capped, so the thin, hot gas near the star does not outshine the disk.
       float glow = min(temp / 5200.0, 1.3);
-      col += trans * blackbody(temp) * glow * glow * (rho + spot * 0.9) * dt * 0.7 * uBright;
+      col += trans * blackbody(temp) * glow * glow * (rho + spot * 0.9 + st.z * 0.12) * dt * 0.7 * uBright;
       trans *= exp(-rho * dt * 0.6);
     }
 
