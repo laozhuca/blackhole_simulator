@@ -16,7 +16,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
     font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
   canvas.dragging { cursor: grabbing; }
   #panel { position: fixed; top: 16px; left: 16px; width: 260px; max-width: calc(100vw - 32px);
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
@@ -289,7 +289,8 @@ float streamDensity(vec3 p) {
 }
 
 void main() {
-  vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+  // Scale by the shorter side, so the scene fits on portrait screens as well as landscape ones.
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / min(uRes.x, uRes.y);
   vec3 dir = normalize(uCamRot * vec3(uv, 1.6));
   vec3 pos = uCamPos;
 
@@ -716,8 +717,9 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(innerWidth * dpr);
-    canvas.height = Math.floor(innerHeight * dpr);
+    // Size the drawing buffer to the canvas's own box, which can differ from the window on mobile.
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
     const w = Math.max(1, Math.floor(canvas.width * state.res));
     const h = Math.max(1, Math.floor(canvas.height * state.res));
     if (w === lowW && h === lowH) return;
