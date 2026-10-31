@@ -11,6 +11,8 @@ Each pixel traces a light ray backward through curved spacetime, so you see:
 
 Switch the scene to **Binary merger** to watch two black holes spiral together and merge into one. Their orbit shrinks as they lose energy to gravitational waves (Peters' formula), and both bend light at once. When the horizons touch, a single hole remains with 5% less mass. A strip chart shows the gravitational-wave signal: a rising chirp, then a short ringdown. The mass-ratio slider sets how unequal the two holes are.
 
+Switch to **Hole + star** for a black hole orbiting a companion star, like an X-ray binary. The star fills its Roche lobe, so the hole's tides stretch it into a teardrop that points at the hole. Gas spills through the inner Lagrange point and streams onto the hole's accretion disk, which the hole's own Roche lobe cuts off at its outer edge. The star mass slider (taking the hole to be 10 solar masses) changes the star's size and temperature and where the stream starts and lands. The star is tidally locked and darker on the stretched side facing the hole. Its orbit is sped up so you can watch it.
+
 ## Run it
 
 Open `index.html` in any browser with WebGL.
@@ -20,7 +22,7 @@ Drag to orbit; scroll or pinch to zoom. On an iPad or other touch screen, drag w
 ## How it works
 
 Units use the Schwarzschild radius `rs = 1`. A photon's path is integrated with the acceleration
-`a = -1.5 h² r / |r|⁵`, where `h = |r × v|` is conserved. That one term reproduces the bending of light in Schwarzschild spacetime. In the binary scene each hole contributes its own term, so light feels both. That is an approximation: real binary spacetime has no exact formula and needs numerical relativity. The disk runs from the innermost stable circular orbit (3 rs) outward, with a Novikov–Thorne-style temperature profile coloured as a blackbody.
+`a = -1.5 h² r / |r|⁵`, where `h = |r × v|` is conserved. That one term reproduces the bending of light in Schwarzschild spacetime. In the binary scene each hole contributes its own term, so light feels both. In the star scene, the Roche-lobe sizes use Eggleton's fit and the inner Lagrange point uses Plavec and Kratochvil's; the star's own light bending is left out, because it is tiny next to the hole's. That is an approximation: real binary spacetime has no exact formula and needs numerical relativity. The disk runs from the innermost stable circular orbit (3 rs) outward, with a Novikov–Thorne-style temperature profile coloured as a blackbody.
 
 ## Music
 

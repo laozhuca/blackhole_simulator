@@ -36,13 +36,13 @@
   button:hover { color: var(--text); }
   #stats { position: fixed; right: 16px; bottom: 16px; color: var(--muted); font-size: 12px;
     font-variant-numeric: tabular-nums; text-align: right; pointer-events: none; }
-  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 4px 0 10px;
+  .modes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; margin: 4px 0 10px;
     border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
   .modes label { text-align: center; padding: 5px 0; cursor: pointer; color: var(--muted); }
   .modes input { position: absolute; opacity: 0; pointer-events: none; }
   .modes label:has(input:checked) { background: rgba(255, 176, 84, 0.18); color: var(--text); }
   .modes label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
-  #status { color: var(--text); margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+  #status, #starStatus { color: var(--text); margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
   .header-buttons { display: flex; gap: 6px; flex-shrink: 0; }
   #music[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   #restart { width: 100%; padding: 5px 8px; margin-top: 4px; }
@@ -70,8 +70,14 @@
   </header>
   <div class="body">
     <div class="modes" role="radiogroup" aria-label="Scene">
-      <label><input type="radio" name="mode" id="modeSingle" value="single" checked> Single</label>
-      <label><input type="radio" name="mode" id="modeBinary" value="binary"> Binary merger</label>
+      <label><input type="radio" name="mode" id="modeSingle" value="single" checked> One hole</label>
+      <label><input type="radio" name="mode" id="modeBinary" value="binary"> Two holes</label>
+      <label><input type="radio" name="mode" id="modeStar" value="star"> Hole + star</label>
+    </div>
+    <div id="starControls" hidden>
+      <div class="row"><label for="starMass">Star mass</label><output id="starMassOut"></output>
+        <input id="starMass" type="range" min="0.3" max="1.5" step="0.05" value="0.6"></div>
+      <div id="starStatus"></div>
     </div>
     <div id="binaryControls" hidden>
       <div class="row"><label for="q">Mass ratio</label><output id="qOut"></output>
@@ -122,6 +128,12 @@ uniform float uLensing;
 uniform vec4  uHoleA;   // xyz position, w Schwarzschild radius
 uniform vec4  uHoleB;   // w = 0 when there is only one hole
 uniform float uMass;    // total mass the disk orbits
+uniform vec3  uDiskCenter;
+uniform vec4  uStar;       // xyz centre, w radius; w = 0 when there is no star
+uniform vec4  uStarShape;  // xyz unit axis toward the hole, w how far the star stretches along it
+uniform float uStarTemp;
+uniform vec3  uStream[8];  // gas stream from the star to the disk, as a polyline
+uniform float uStreamReach; // 0 when there is no stream
 
 // Units: the final (or only) hole has rs = 1, so M = 0.5 and its photon sphere sits at r = 1.5.
 const int   MAX_STEPS = 400;
@@ -183,7 +195,8 @@ vec3 starfield(vec3 d) {
 }
 
 // Emission from the thin disk where the ray crosses y = 0 at radius r.
-vec4 diskSample(vec3 p, vec3 rayDir) {
+vec4 diskSample(vec3 hit, vec3 rayDir) {
+  vec3 p = hit - uDiskCenter;
   float r = length(p.xz);
   if (r < uDiskIn || r > uDiskOut) return vec4(0.0);
 
@@ -193,8 +206,8 @@ vec4 diskSample(vec3 p, vec3 rayDir) {
   float gamma = 1.0 / sqrt(1.0 - v * v);
   float cosTheta = dot(tangent, -rayDir);
   float doppler = 1.0 / (gamma * (1.0 - v * cosTheta));
-  float potential = uHoleA.w / length(p - uHoleA.xyz);
-  if (uHoleB.w > 0.0) potential += uHoleB.w / length(p - uHoleB.xyz);
+  float potential = uHoleA.w / length(hit - uHoleA.xyz);
+  if (uHoleB.w > 0.0) potential += uHoleB.w / length(hit - uHoleB.xyz);
   float gravShift = sqrt(max(1.0 - potential, 0.0));
   float g = mix(1.0, doppler * gravShift, uDoppler);
 
@@ -234,6 +247,47 @@ float holeStep(float d, float rs) {
   return 0.06 * rs * n * n / (1.0 + n);
 }
 
+// The star, stretched by the hole's tides into a teardrop that points at it.
+// Returns the outward normal if p is inside, or a zero vector if not.
+vec3 starNormal(vec3 p) {
+  vec3 d = p - uStar.xyz;
+  float along = dot(d, uStarShape.xyz);
+  vec3 perp = d - along * uStarShape.xyz;
+  float R = uStar.w;
+  float Ra = along > 0.0 ? R * uStarShape.w : R;
+  if ((along * along) / (Ra * Ra) + dot(perp, perp) / (R * R) > 1.0) return vec3(0.0);
+  return normalize(perp / (R * R) + uStarShape.xyz * along / (Ra * Ra));
+}
+
+vec3 starSurface(vec3 n, vec3 rayDir) {
+  vec3 axis = uStarShape.xyz;
+  // Tidally locked, so the granulation is fixed in a frame that turns with the orbit.
+  vec3 side = normalize(cross(axis, vec3(0.0, 1.0, 0.0)));
+  vec3 local = vec3(dot(n, axis), n.y, dot(n, side));
+  float gran = 0.75 + 0.5 * fbm(local * 9.0 + vec3(0.0, 0.0, uTime * 0.08));
+  // Gravity darkening: the stretched side facing the hole is cooler.
+  float temp = uStarTemp * (1.0 - 0.22 * max(dot(n, axis), 0.0));
+  float mu = max(dot(n, -rayDir), 0.0);
+  float limb = 1.0 - 0.6 * (1.0 - mu);
+  return blackbody(temp) * limb * gran * 0.42;
+}
+
+// Glowing gas in the stream from the inner Lagrange point to the disk, ending in a hot spot.
+float streamDensity(vec3 p) {
+  float best = 1e4, bestS = 0.0;
+  for (int k = 0; k < 7; k++) {
+    vec3 a = uStream[k], b = uStream[k + 1];
+    vec3 ab = b - a;
+    float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+    vec3 q = a + ab * t - p;
+    float d2 = dot(q, q);
+    if (d2 < best) { best = d2; bestS = (float(k) + t) / 7.0; }
+  }
+  float w = mix(0.45, 0.28, bestS);
+  float spot = exp(-dot(p - uStream[7], p - uStream[7]) / 0.15);
+  return exp(-best / (w * w)) * (0.5 + bestS) + spot * 1.2;
+}
+
 void main() {
   vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
   vec3 dir = normalize(uCamRot * vec3(uv, 1.6));
@@ -242,6 +296,8 @@ void main() {
   vec3 col = vec3(0.0);
   float trans = 1.0;
   bool captured = false;
+  bool hitStar = false;
+  vec3 starGlow = blackbody(uStarTemp);
 
   for (int i = 0; i < MAX_STEPS; i++) {
     float r = length(pos);
@@ -250,8 +306,32 @@ void main() {
     if (dA < uHoleA.w || dB < uHoleB.w) { captured = true; break; }
     if (r > ESCAPE_R && dot(pos, dir) > 0.0) break;
 
+    if (uStar.w > 0.0) {
+      vec3 n = starNormal(pos);
+      if (dot(n, n) > 0.0) {
+        col += trans * starSurface(n, normalize(dir));
+        hitStar = true;
+        break;
+      }
+    }
+
     float dt = clamp(min(holeStep(dA, uHoleA.w), holeStep(dB, uHoleB.w)), 0.01, 1.6);
-    if (abs(pos.y) < 1.0 && r < uDiskOut + 2.0) dt = min(dt, 0.12);
+    float rDisk = length(pos - uDiskCenter);
+    if (abs(pos.y) < 1.0 && rDisk < max(uDiskOut, uStreamReach) + 2.0) dt = min(dt, 0.12);
+
+    if (uStar.w > 0.0) {
+      // Slow down near the star so rays do not step over its edge, and add its glow.
+      float h = length(pos - uStar.xyz) - uStar.w * uStarShape.w;
+      dt = min(dt, max(h * 0.7, 0.06));
+      float hs = max(length(pos - uStar.xyz) - uStar.w, 0.0);
+      col += trans * starGlow * exp(-hs * 0.9) * 0.012 * dt;
+    }
+
+    if (uStreamReach > 0.0 && abs(pos.y) < 1.2 && rDisk < uStreamReach + 1.5) {
+      float rho = streamDensity(pos) * (0.8 + 0.4 * noise(pos * 2.0 + uTime * 0.3));
+      col += trans * blackbody(7500.0) * rho * dt * 0.45 * uBright;
+      trans *= exp(-rho * dt * 0.5);
+    }
 
     vec3 acc = (holeAccel(pos, dir, uHoleA) + holeAccel(pos, dir, uHoleB)) * uLensing;
     vec3 prev = pos;
@@ -269,7 +349,7 @@ void main() {
     }
   }
 
-  if (!captured) col += trans * starfield(normalize(dir));
+  if (!captured && !hitStar) col += trans * starfield(normalize(dir));
 
   // Gentle saturation boost, then filmic tone mapping and gamma.
   col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, 1.35);
@@ -320,7 +400,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
 
   const loc = (p, n) => gl.getUniformLocation(p, n);
   const U = {};
-  for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing', 'uHoleA', 'uHoleB', 'uMass'])
+  for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing', 'uHoleA', 'uHoleB', 'uMass',
+                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach'])
     U[n] = loc(traceProg, n);
 
   // Ray-trace into a low-resolution texture, then stretch it over the canvas.
@@ -341,6 +422,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     spin: true,
     mode: 'single',
     q: 1,
+    starMass: 0.6,
   };
 
   const sliders = {
@@ -351,6 +433,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     speed: (v) => v.toFixed(2) + '×',
     res: (v) => Math.round(v * 100) + '%',
     q: (v) => v.toFixed(2),
+    // Shown in solar masses, taking the hole to be 10 of them.
+    starMass: (v) => (v * 10).toFixed(1) + ' M☉',
   };
   for (const [key, fmt] of Object.entries(sliders)) {
     const input = $(key), out = $(key + 'Out');
@@ -409,7 +493,75 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     return b.mergeStrain * Math.exp(-t / 4) * Math.cos(b.mergeOmega * 1.6 * t);
   }
 
+  // A hole with a companion star, like an X-ray binary. The hole keeps rs = 1 (M = 0.5);
+  // the star's mass is a multiple of that. The star fills its Roche lobe, so gas spills
+  // through the inner Lagrange point and streams onto the hole's disk.
+  const STAR_SEP = 20;
+  const STAR_ORBIT_SPEEDUP = 3; // the real orbit would take minutes to watch
+  const starSys = { phase: 0 };
+
+  // Eggleton's fit for the Roche-lobe radius, as a fraction of the separation.
+  const rocheLobe = (q) => {
+    const q3 = Math.cbrt(q), q23 = q3 * q3;
+    return 0.49 * q23 / (0.6 * q23 + Math.log(1 + q3));
+  };
+
+  function starGeometry() {
+    const qs = state.starMass, mHole = 0.5, mStar = qs * mHole, M = mHole + mStar;
+    const a = STAR_SEP;
+    const radius = 0.85 * a * rocheLobe(qs);
+    // Inner Lagrange point, measured from the hole (Plavec and Kratochvil's fit).
+    const l1 = a * (0.5 - 0.227 * Math.log10(qs));
+    // The star's tip reaches L1; the disk is cut off by the hole's own Roche lobe.
+    const stretch = Math.min(Math.max((a - l1) / radius, 1), 1.7);
+    const diskOut = Math.max(0.75 * a * rocheLobe(1 / qs), 4.5);
+    // Main-sequence temperature, roughly T ~ M^0.55, for a 10 solar-mass hole.
+    const temp = Math.min(5800 * Math.pow(qs * 10, 0.55), 35000);
+    return { mHole, mStar, M, a, radius, l1, stretch, diskOut, temp };
+  }
+
+  function starScene() {
+    const g = starGeometry();
+    const c = Math.cos(starSys.phase), s = Math.sin(starSys.phase);
+    const hole = [-g.a * g.mStar / g.M * c, 0, -g.a * g.mStar / g.M * s];
+    const star = [g.a * g.mHole / g.M * c, 0, g.a * g.mHole / g.M * s];
+    const u = [c, 0, s];          // hole to star
+    const w = [-s, 0, c];         // the direction the orbit moves in
+    // The stream falls from L1 and the Coriolis force swings it forward, onto the disk's rim.
+    const stream = [];
+    for (let i = 0; i < 8; i++) {
+      const t = i / 7;
+      const r = g.l1 + (g.diskOut * 0.95 - g.l1) * Math.pow(t, 0.75);
+      const ang = 0.95 * Math.pow(t, 1.4);
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      stream.push(hole[0] + r * (ca * u[0] + sa * w[0]), 0, hole[2] + r * (ca * u[2] + sa * w[2]));
+    }
+    return {
+      a: [...hole, 1], b: [0, 0, 0, 0], mass: g.mHole, diskIn: 3, diskOut: g.diskOut,
+      diskCenter: hole,
+      star: [...star, g.radius], starShape: [-c, 0, -s, g.stretch], starTemp: g.temp,
+      stream, streamReach: g.l1,
+    };
+  }
+
+  function starStatusText() {
+    const g = starGeometry();
+    const period = 2 * Math.PI * Math.sqrt(g.a ** 3 / g.M) / TIME_SCALE / STAR_ORBIT_SPEEDUP;
+    const temp = Math.round(g.temp / 500) * 500;
+    return `${temp.toLocaleString()} K star, filling its Roche lobe · orbit ${period.toFixed(0)} s (sped up)`;
+  }
+
+  const NO_EXTRAS = {
+    diskCenter: [0, 0, 0], star: [0, 0, 0, 0], starShape: [1, 0, 0, 1], starTemp: 5800,
+    stream: new Array(24).fill(0), streamReach: 0,
+  };
+
   function holes() {
+    if (state.mode === 'star') return starScene();
+    return { ...NO_EXTRAS, ...binaryHoles() };
+  }
+
+  function binaryHoles() {
     if (state.mode === 'single') return { a: [0, 0, 0, 1], b: [0, 0, 0, 0], mass: 0.5, diskIn: 3 };
     const b = binary;
     if (b.merged) {
@@ -469,9 +621,12 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     const isBinary = mode === 'binary';
     $('binaryControls').hidden = !isBinary;
     $('wave').hidden = !isBinary;
+    $('starControls').hidden = mode !== 'star';
+    // The star system is wider than the others, so step back to see all of it.
+    if (mode === 'star' && state.dist < 42) setDist(42);
     resetBinary();
   }
-  for (const id of ['modeSingle', 'modeBinary'])
+  for (const id of ['modeSingle', 'modeBinary', 'modeStar'])
     $(id).addEventListener('change', (e) => { if (e.target.checked) setMode(e.target.value); });
   $('restart').addEventListener('click', resetBinary);
   $('q').addEventListener('change', resetBinary);
@@ -615,6 +770,10 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       wave[waveHead] = strain();
       waveHead = (waveHead + 1) % wave.length;
     }
+    if (state.mode === 'star') {
+      const g = starGeometry();
+      starSys.phase += Math.sqrt(g.M / g.a ** 3) * dt * state.speed * TIME_SCALE * STAR_ORBIT_SPEEDUP;
+    }
     const hs = holes();
     if (state.spin && !dragging()) state.yaw += dt * 0.05 * Math.max(state.speed, 0.2);
     resize();
@@ -632,7 +791,13 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     // A lone hole's disk starts at the innermost stable circular orbit, 3 rs;
     // around a binary the gas keeps clear of the orbit, leaving a wider cavity.
     gl.uniform1f(U.uDiskIn, hs.diskIn);
-    gl.uniform1f(U.uDiskOut, Math.max(state.diskOuter, hs.diskIn + 5));
+    gl.uniform1f(U.uDiskOut, hs.diskOut || Math.max(state.diskOuter, hs.diskIn + 5));
+    gl.uniform3fv(U.uDiskCenter, hs.diskCenter);
+    gl.uniform4fv(U.uStar, hs.star);
+    gl.uniform4fv(U.uStarShape, hs.starShape);
+    gl.uniform1f(U.uStarTemp, hs.starTemp);
+    gl.uniform3fv(U.uStream, hs.stream);
+    gl.uniform1f(U.uStreamReach, hs.streamReach);
     gl.uniform4fv(U.uHoleA, hs.a);
     gl.uniform4fv(U.uHoleB, hs.b);
     gl.uniform1f(U.uMass, hs.mass);
@@ -661,6 +826,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       $('status').textContent = statusText();
       drawWave();
     }
+    if (state.mode === 'star') $('starStatus').textContent = starStatusText();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
