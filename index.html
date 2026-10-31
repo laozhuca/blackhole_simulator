@@ -1178,11 +1178,13 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     ws.pos = add3(ws.pos, ws.head, ws.speed * dt);
   }
 
+  // The hole is back however the swallow ends: off 5x, a replay, or a return to the scene.
   function endSwallow() {
     whale.swallow = null;
     whale.holeGone = false;
     whaleUniforms.uInner.value = 0;
     if (whale.diskLight) whale.diskLight.intensity = 300;
+    if (whale.state === 'ready') setWhaleStatus('A space whale swims a slow loop around the hole.');
   }
 
   function setWhaleStatus(text) {
@@ -1301,7 +1303,6 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     else if (size !== GIANT && whale.swallow) {
       // Back below 5x: the hole returns and the opening plays again.
       endSwallow();
-      setWhaleStatus('A space whale swims a slow loop around the hole.');
       setDist(24);
       whale.intro = null;
     }
