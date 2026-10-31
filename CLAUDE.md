@@ -1,6 +1,6 @@
 # Black hole simulator
 
-A single-page WebGL simulation: `index.html` holds the page, shaders and script; `music.mp3` is the background track. No build step.
+A single-page WebGL simulation: `index.html` holds the page, shaders and script; `music.mp3` is the background track and `whale.glb` the space whale model. No build step. The whale scene loads three.js 0.147.0 from jsDelivr and needs the page served over HTTP, not opened as a file.
 
 ## Checking changes
 
