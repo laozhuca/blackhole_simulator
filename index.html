@@ -14,6 +14,7 @@
     --line: rgba(255, 255, 255, 0.12);
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
     font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
   canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
@@ -86,6 +87,8 @@
       <div id="status"></div>
       <button id="restart">Restart merger</button>
     </div>
+    <div class="row" id="spinRow"><label for="holeSpin">Hole spin</label><output id="holeSpinOut"></output>
+      <input id="holeSpin" type="range" min="0" max="0.99" step="0.01" value="0.9"></div>
     <div class="row"><label for="dist">Camera distance</label><output id="distOut"></output>
       <input id="dist" type="range" min="6" max="60" step="0.1" value="24"></div>
     <div class="row"><label for="incl">Camera inclination</label><output id="inclOut"></output>
@@ -137,6 +140,11 @@ uniform vec3  uStream[8];  // gas stream from the star to the disk, as a polylin
 uniform float uStreamReach; // 0 when there is no stream
 uniform float uArmStrength; // tidal spiral arms in the disk; 0 when there is no star
 uniform vec4  uJet;         // xyz base (the hole), w = 1 when the jets are on
+uniform float uKerr;        // 1: trace light through the spinning hole's exact (Kerr) spacetime
+uniform float uSpin;        // the hole's spin parameter a = chi M, in units of rs (M = 0.5)
+uniform float uHorizon;     // its event horizon, r+ = M + sqrt(M^2 - a^2)
+uniform float uDiskHeat;    // disk temperature scale: a spinning hole's disk runs hotter
+uniform float uJetPower;    // jet brightness: spin powers the jets
 
 // Units: the final (or only) hole has rs = 1, so M = 0.5 and its photon sphere sits at r = 1.5.
 const int   MAX_STEPS = 400;
@@ -200,7 +208,7 @@ vec3 starfield(vec3 d) {
 // Novikov-Thorne-like temperature profile: zero at the inner edge, peaking just outside it.
 float diskTemp(float r) {
   float x = uDiskIn / max(r, uDiskIn);
-  return pow(x, 0.75) * pow(max(1.0 - sqrt(x), 0.0), 0.25) / 0.488 * 5200.0;
+  return pow(x, 0.75) * pow(max(1.0 - sqrt(x), 0.0), 0.25) / 0.488 * 5200.0 * uDiskHeat;
 }
 
 // Glowing haze just above and below the disk, in the disk's colour at each radius,
@@ -212,7 +220,7 @@ vec3 diskHaze(vec3 pos) {
   if (fade <= 0.0) return vec3(0.0);
   float temp = diskTemp(clamp(r, uDiskIn + 0.3, uDiskOut));
   float glow = temp / 5200.0;
-  return blackbody(temp) * glow * glow * exp(-abs(rel.y) / 0.7) * fade;
+  return blackbody(temp) * glow * glow * exp(-abs(rel.y) / 0.4) * fade;
 }
 
 // Emission from the thin disk where the ray crosses y = 0 at radius r.
@@ -270,6 +278,46 @@ vec3 holeAccel(vec3 pos, vec3 dir, vec4 hole) {
   vec3 d = pos - hole.xyz;
   vec3 h = cross(d, dir);
   return -1.5 * hole.w * dot(h, h) * d / pow(length(d), 5.0);
+}
+
+// Light around a spinning hole, traced exactly in Kerr-Schild coordinates. There the
+// metric is g = eta + f l l, with the spin axis along the scene's y axis. A ray is the
+// Hamiltonian flow of H = 1/2 g^{mu nu} p_mu p_nu with p_t conserved; the force needs
+// the gradient of F = f (l.p)^2, taken here by central differences.
+vec3 toKS(vec3 v) { return vec3(v.x, v.z, v.y); }   // its own inverse
+
+// We trace from the camera, against the light. Running a Kerr hole backward in time gives
+// the same hole spinning the other way, so the ray is followed forward in time around a
+// hole of spin -a. That way it crosses the horizon cleanly (these coordinates are regular
+// on the future horizon) instead of crawling along it.
+void kerrGeom(vec3 x, out float f, out vec3 l, out float r) {
+  float a = -uSpin, a2 = a * a;
+  float b = dot(x, x) - a2;
+  float r2 = 0.5 * (b + sqrt(b * b + 4.0 * a2 * x.z * x.z));
+  r = sqrt(max(r2, 1e-6));
+  f = 2.0 * 0.5 * r2 * r / (r2 * r2 + a2 * x.z * x.z);
+  l = vec3((r * x.x + a * x.y) / (r2 + a2), (r * x.y - a * x.x) / (r2 + a2), x.z / r);
+}
+
+float kerrF(vec3 x, float pt, vec3 p) {
+  float f, r; vec3 l;
+  kerrGeom(x, f, l, r);
+  float lp = -pt + dot(l, p);
+  return f * lp * lp;
+}
+
+vec3 kerrVel(vec3 x, float pt, vec3 p) {
+  float f, r; vec3 l;
+  kerrGeom(x, f, l, r);
+  return p - f * (-pt + dot(l, p)) * l;
+}
+
+vec3 kerrForce(vec3 x, float pt, vec3 p) {
+  float e = 0.002 * max(length(x), 0.5);
+  return 0.5 * vec3(
+    kerrF(x + vec3(e, 0.0, 0.0), pt, p) - kerrF(x - vec3(e, 0.0, 0.0), pt, p),
+    kerrF(x + vec3(0.0, e, 0.0), pt, p) - kerrF(x - vec3(0.0, e, 0.0), pt, p),
+    kerrF(x + vec3(0.0, 0.0, e), pt, p) - kerrF(x - vec3(0.0, 0.0, e), pt, p)) / (2.0 * e);
 }
 
 // Step length near one hole: small close in, large far away, scaled to the hole's size.
@@ -345,8 +393,9 @@ vec4 jetEmission(vec3 p, vec3 rayDir) {
   float width = 0.35 + 0.05 * ah + 1.6 * exp(-ah / 2.5);
   if (ah > JET_LENGTH || radial > width * 4.0) return vec4(0.0, 0.0, 0.0, width);
   float core = exp(-radial * radial / (width * width));
+  // The bright jet begins about where the disk does, so closer in around a spinning hole.
   float funnel = 0.12 * smoothstep(1.0, 3.0, ah) * (1.0 - smoothstep(4.0, 8.0, ah));
-  float ramp = smoothstep(4.5, 12.0, ah);
+  float ramp = smoothstep(1.5 * uDiskIn, 4.0 * uDiskIn, ah);
   float body = (funnel + ramp) * (1.0 - smoothstep(JET_LENGTH * 0.55, JET_LENGTH, ah));
   // Knots travel outward, growing as the jet gets going; the jet fades as it spreads.
   float knots = 1.0 + ramp * (0.65 * pow(0.5 + 0.5 * sin(ah * 0.55 - uTime * 3.5), 4.0) - 0.4);
@@ -371,17 +420,41 @@ void main() {
   vec3 col = vec3(0.0);
   float trans = 1.0;
   bool captured = false;
+  bool escaped = false;
   bool hitStar = false;
   vec3 starGlow = blackbody(uStarTemp);
   // Closest the (bent) ray comes to the star's surface, for the halo added after the march.
   float starMiss = 1e4, starMissTrans = 1.0;
 
+  // For the Kerr tracer: the ray's position and momentum relative to the hole, in
+  // Kerr-Schild coordinates, moving forward in time (the positive root of the null condition).
+  bool kerr = uKerr > 0.5 && uLensing > 0.5;
+  vec3 kx = vec3(0.0), kp = vec3(0.0);
+  float kpt = 0.0;
+  if (kerr) {
+    kx = toKS(pos - uHoleA.xyz);
+    vec3 v = toKS(dir);
+    float f, r; vec3 l;
+    kerrGeom(kx, f, l, r);
+    float L = dot(l, v);
+    float root = sqrt(max(1.0 - f + f * L * L, 0.0));
+    float t1 = (-f * L + root) / (f - 1.0), t2 = (-f * L - root) / (f - 1.0);
+    float tdot = max(t1, t2);
+    float lx = tdot + L;
+    kpt = -tdot + f * lx;
+    kp = v + f * lx * l;
+  }
+
   for (int i = 0; i < MAX_STEPS; i++) {
     float r = length(pos);
     float dA = length(pos - uHoleA.xyz);
     float dB = length(pos - uHoleB.xyz);
-    if (dA < uHoleA.w || dB < uHoleB.w) { captured = true; break; }
-    if (r > ESCAPE_R && dot(pos, dir) > 0.0) break;
+    if (kerr) {
+      float f, rk; vec3 l;
+      kerrGeom(kx, f, l, rk);
+      if (rk < uHorizon * 1.05) { captured = true; break; }
+    } else if (dA < uHoleA.w || dB < uHoleB.w) { captured = true; break; }
+    if (r > ESCAPE_R && dot(pos, dir) > 0.0) { escaped = true; break; }
 
     if (uStar.w > 0.0) {
       vec3 n = starNormal(pos);
@@ -394,19 +467,19 @@ void main() {
       }
     }
 
-    float dt = clamp(min(holeStep(dA, uHoleA.w), holeStep(dB, uHoleB.w)), 0.01, 1.6);
+    float dt = clamp(min(holeStep(dA, kerr ? 1.0 : uHoleA.w), holeStep(dB, uHoleB.w)), 0.01, 1.6);
     float rDisk = length(pos - uDiskCenter);
     if (abs(pos.y) < 1.0 && rDisk < max(uDiskOut, uStreamReach) + 2.0) dt = min(dt, 0.12);
 
     if (abs(pos.y) < 3.0 && rDisk < uDiskOut * 1.4 + 1.0)
-      col += trans * diskHaze(pos) * dt * 0.04 * uBright;
+      col += trans * diskHaze(pos) * dt * 0.03 * uBright;
 
     if (uJet.w > 0.0) {
       vec4 jet = jetEmission(pos, normalize(dir));
       // Small steps inside the narrow beam, so it is sampled, not stepped over.
       if (length((pos - uJet.xyz).xz) < jet.w * 4.0 && abs(pos.y - uJet.y) < JET_LENGTH)
         dt = min(dt, max(jet.w * 0.6, 0.08));
-      col += trans * jet.rgb * dt * 2.2;
+      col += trans * jet.rgb * dt * 2.2 * uJetPower;
     }
 
     if (uStar.w > 0.0) {
@@ -434,10 +507,21 @@ void main() {
       trans *= exp(-rho * dt * 0.6);
     }
 
-    vec3 acc = (holeAccel(pos, dir, uHoleA) + holeAccel(pos, dir, uHoleB)) * uLensing;
     vec3 prev = pos;
-    dir += acc * dt;
-    pos += dir * dt;
+    if (kerr) {
+      // Midpoint (second-order Runge-Kutta) step of the Hamiltonian flow.
+      vec3 v1 = kerrVel(kx, kpt, kp), f1 = kerrForce(kx, kpt, kp);
+      vec3 xm = kx + 0.5 * dt * v1, pm = kp + 0.5 * dt * f1;
+      vec3 vm = kerrVel(xm, kpt, pm);
+      kx += dt * vm;
+      kp += dt * kerrForce(xm, kpt, pm);
+      pos = uHoleA.xyz + toKS(kx);
+      dir = toKS(vm);
+    } else {
+      vec3 acc = (holeAccel(pos, dir, uHoleA) + holeAccel(pos, dir, uHoleB)) * uLensing;
+      dir += acc * dt;
+      pos += dir * dt;
+    }
 
     // Thin disk crossing.
     if (prev.y * pos.y < 0.0) {
@@ -450,6 +534,9 @@ void main() {
     }
   }
 
+  // A ray that runs out of steps without escaping is spiralling in; treat it as captured
+  // rather than letting it pick up the sky.
+  if (kerr && !escaped && !hitStar && trans > 0.02) captured = true;
   if (!captured && !hitStar) col += trans * starfield(normalize(dir));
 
   // The star's halo: a bright corona hugging the surface and a wide, faint glow beyond it.
@@ -511,7 +598,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   const loc = (p, n) => gl.getUniformLocation(p, n);
   const U = {};
   for (const n of ['uRes', 'uTime', 'uCamPos', 'uCamRot', 'uDiskIn', 'uDiskOut', 'uBright', 'uDoppler', 'uLensing', 'uHoleA', 'uHoleB', 'uMass',
-                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach', 'uArmStrength', 'uJet'])
+                   'uDiskCenter', 'uStar', 'uStarShape', 'uStarTemp', 'uStream', 'uStreamReach', 'uArmStrength', 'uJet',
+                   'uKerr', 'uSpin', 'uHorizon', 'uDiskHeat', 'uJetPower'])
     U[n] = loc(traceProg, n);
 
   // Ray-trace into a low-resolution texture, then stretch it over the canvas.
@@ -533,10 +621,12 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     mode: 'single',
     q: 1,
     starMass: 0.6,
+    holeSpin: 0.9,
     jets: true,
   };
 
   const sliders = {
+    holeSpin: (v) => v.toFixed(2),
     dist: (v) => v.toFixed(1) + ' rs',
     incl: (v) => v.toFixed(0) + '°',
     diskOuter: (v) => v.toFixed(1) + ' rs',
@@ -650,7 +740,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       stream.push(hole[0] + r * (ca * u[0] + sa * w[0]), 0, hole[2] + r * (ca * u[2] + sa * w[2]));
     }
     return {
-      a: [...hole, 1], b: [0, 0, 0, 0], mass: g.mHole, diskIn: 3, diskOut: g.diskOut,
+      a: [...hole, 1], b: [0, 0, 0, 0], mass: g.mHole, diskIn: spinPhysics().isco, diskOut: g.diskOut,
       diskCenter: hole,
       star: [...star, g.radius], starShape: [-c, 0, -s, g.stretch], starTemp: g.temp,
       stream, streamReach: g.l1,
@@ -667,6 +757,26 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     return `${temp.toLocaleString()} K star, filling its Roche lobe · orbit ${period.toFixed(0)} s (sped up)`;
   }
 
+  // A spinning hole (prograde disk). Bardeen, Press and Teukolsky's innermost stable
+  // circular orbit, and the disk's radiative efficiency 1 - E_isco, both for M = 0.5.
+  function spinPhysics() {
+    const chi = state.holeSpin, M = 0.5;
+    const z1 = 1 + Math.cbrt(1 - chi * chi) * (Math.cbrt(1 + chi) + Math.cbrt(1 - chi));
+    const z2 = Math.sqrt(3 * chi * chi + z1 * z1);
+    const isco = M * (3 + z2 - Math.sqrt((3 - z1) * (3 + z1 + 2 * z2)));
+    const efficiency = 1 - Math.sqrt(1 - 2 * M / (3 * isco));
+    return {
+      spin: chi * M,
+      horizon: M + Math.sqrt(M * M - (chi * M) ** 2),
+      isco,
+      // Peak temperature scales as efficiency^(1/4), relative to a non-spinning hole's 5.7%.
+      diskHeat: Math.pow(efficiency / 0.0572, 0.25),
+      // Blandford-Znajek: jet power grows with spin squared; a slow hole keeps a weak,
+      // disk-driven jet.
+      jetPower: 0.3 + 0.7 * chi * chi,
+    };
+  }
+
   const NO_EXTRAS = {
     diskCenter: [0, 0, 0], star: [0, 0, 0, 0], starShape: [1, 0, 0, 1], starTemp: 5800,
     stream: new Array(24).fill(0), streamReach: 0, armStrength: 0, jet: [0, 0, 0, 0],
@@ -678,7 +788,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   }
 
   function binaryHoles() {
-    if (state.mode === 'single') return { a: [0, 0, 0, 1], b: [0, 0, 0, 0], mass: 0.5, diskIn: 3 };
+    if (state.mode === 'single') return { a: [0, 0, 0, 1], b: [0, 0, 0, 0], mass: 0.5, diskIn: spinPhysics().isco };
     const b = binary;
     if (b.merged) {
       // A brief, small ringdown wobble in the horizon size as the new hole settles.
@@ -738,6 +848,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     $('binaryControls').hidden = !isBinary;
     $('wave').hidden = !isBinary;
     $('starControls').hidden = mode !== 'star';
+    $('spinRow').hidden = isBinary;
     // The star system is wider than the others, so step back to see all of it.
     if (mode === 'star' && state.dist < 42) setDist(42);
     resetBinary();
@@ -908,6 +1019,13 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     // A lone hole's disk starts at the innermost stable circular orbit, 3 rs;
     // around a binary the gas keeps clear of the orbit, leaving a wider cavity.
     gl.uniform1f(U.uDiskIn, hs.diskIn);
+    // Spin applies to a lone hole; the binary keeps the non-spinning approximation.
+    const sp = spinPhysics(), kerrOn = state.mode !== 'binary';
+    gl.uniform1f(U.uKerr, kerrOn ? 1 : 0);
+    gl.uniform1f(U.uSpin, kerrOn ? sp.spin : 0);
+    gl.uniform1f(U.uHorizon, kerrOn ? sp.horizon : 1);
+    gl.uniform1f(U.uDiskHeat, kerrOn ? sp.diskHeat : 1);
+    gl.uniform1f(U.uJetPower, sp.jetPower);
     gl.uniform1f(U.uDiskOut, hs.diskOut || Math.max(state.diskOuter, hs.diskIn + 5));
     gl.uniform3fv(U.uDiskCenter, hs.diskCenter);
     gl.uniform4fv(U.uStar, hs.star);
