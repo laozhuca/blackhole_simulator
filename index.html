@@ -876,7 +876,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
   // The space whale: a fantasy scene. three.js draws the model from the same camera into
   // its own canvas, which becomes a texture the ray tracer bends around the hole.
   const whale = { state: 'idle', canvas: null, renderer: null, scene: null, camera: null,
-                  model: null, material: null, trail: null, trailPts: [], pos: [0, 0, 0] };
+                  model: null, material: null, pos: [0, 0, 0] };
   const whaleTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, whaleTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
@@ -910,7 +910,35 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     }
   }
 
-  const whaleUniforms = { uSwim: { value: 0 } };
+  const whaleUniforms = { uSwim: { value: 0 }, uMouth: { value: 0 } };
+
+  // The model has no skeleton or animation, so it is posed in the vertex shader. In model
+  // space it is 1.9 long along z (head at +z), the side fins reach x = +-0.45 at z 0-0.4,
+  // the dorsal fin rises above y = 0.15 there, and the mouth, modelled open, is a gap
+  // between y = -0.08 and +0.05 in front of z = 0.5.
+  const WHALE_POSE = `
+    // Mouth: the lower half of the head hinges up to close the gap, unless uMouth opens it.
+    float jaw = smoothstep(0.36, 0.5, position.z) * (1.0 - smoothstep(-0.035, 0.0, position.y));
+    float shut = (1.0 - 1.2 * uMouth) * jaw;
+    float lever = position.z - 0.4;
+    transformed.y += shut * (0.22 * lever + 0.04);
+    transformed.z -= shut * 0.22 * (position.y + 0.01);
+    // Side fins flap slowly; the dorsal fin sways a little.
+    float side = abs(position.x);
+    float fin = smoothstep(0.17, 0.24, side) * smoothstep(-0.05, 0.05, position.z) * (1.0 - smoothstep(0.32, 0.42, position.z));
+    transformed.y += fin * (side - 0.17) * 0.35 * sin(uSwim * 1.5 + position.z * 2.0);
+    float dorsal = smoothstep(0.14, 0.2, position.y) * smoothstep(-0.15, -0.05, position.z) * (1.0 - smoothstep(0.3, 0.4, position.z));
+    transformed.x += dorsal * (position.y - 0.14) * 0.25 * sin(uSwim * 1.1);
+    // The tail sweeps from side to side.
+    float tail = smoothstep(0.5, -0.95, position.z);
+    transformed.x += sin(position.z * 3.2 - uSwim * 3.0) * 0.12 * tail;
+  `;
+
+  // The mouth stays closed most of the time and opens for a moment about every nine seconds.
+  function mouthOpening(t) {
+    const phase = t % 9;
+    return Math.min(Math.max((phase - 6.5) / 0.6, 0), 1) * (1 - Math.min(Math.max((phase - 8.2) / 0.6, 0), 1));
+  }
 
   function buildWhale(model) {
     whale.canvas = document.createElement('canvas');
@@ -939,15 +967,11 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
       m.emissive = new THREE.Color(0xffffff);
       m.emissiveMap = m.map;
       m.emissiveIntensity = 0.3;
-      // The model has no animation, so sweep the tail from side to side in the vertex shader.
-      // It is 1.9 long along z, head toward +z.
       m.onBeforeCompile = (shader) => {
         shader.uniforms.uSwim = whaleUniforms.uSwim;
-        shader.vertexShader = 'uniform float uSwim;\n' + shader.vertexShader.replace(
-          '#include <begin_vertex>',
-          `#include <begin_vertex>
-           float tail = smoothstep(0.5, -0.95, position.z);
-           transformed.x += sin(position.z * 3.2 - uSwim * 3.0) * 0.12 * tail;`);
+        shader.uniforms.uMouth = whaleUniforms.uMouth;
+        shader.vertexShader = 'uniform float uSwim;\nuniform float uMouth;\n' + shader.vertexShader.replace(
+          '#include <begin_vertex>', '#include <begin_vertex>\n' + WHALE_POSE);
       };
       whale.material = m;
     });
@@ -956,16 +980,6 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     holder.add(model);
     whale.scene.add(holder);
     whale.model = holder;
-
-    // A trail of fading sparks behind it.
-    const n = 160;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-    whale.trail = new THREE.Points(geo, new THREE.PointsMaterial({
-      size: 0.35, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    }));
-    whale.scene.add(whale.trail);
   }
 
   // Where the whale is at simulation time t: a tilted, bobbing loop around the hole.
@@ -985,19 +999,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.model.lookAt(...ahead);
     whale.model.rotateZ(0.25 * Math.sin(t * 0.9));   // a gentle roll
     whaleUniforms.uSwim.value = t;
-
-    // Sparks shed from the tail, fading as they age.
-    whale.model.updateMatrixWorld();
-    const tailPos = new THREE.Vector3(0, 0, -0.95).applyMatrix4(whale.model.children[0].matrixWorld);
-    whale.trailPts.unshift([tailPos.x + (Math.random() - 0.5) * 0.4, tailPos.y + (Math.random() - 0.5) * 0.4, tailPos.z + (Math.random() - 0.5) * 0.4]);
-    const tp = whale.trail.geometry.attributes.position, tc = whale.trail.geometry.attributes.color;
-    whale.trailPts.length = Math.min(whale.trailPts.length, tp.count);
-    for (let i = 0; i < tp.count; i++) {
-      const q = whale.trailPts[i] || p, fade = whale.trailPts[i] ? 1 - i / tp.count : 0;
-      tp.setXYZ(i, ...q);
-      tc.setXYZ(i, 0.4 * fade, 0.9 * fade, 1.0 * fade);
-    }
-    tp.needsUpdate = true; tc.needsUpdate = true;
+    whaleUniforms.uMouth.value = mouthOpening(t);
 
     // Match the ray tracer's camera: focal length 1.6 across the shorter side.
     const camera = whale.camera, minSide = Math.min(w, h);
