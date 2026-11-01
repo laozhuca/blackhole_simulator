@@ -1190,6 +1190,7 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     whale.swallow = null;
     whale.holeGone = false;
     whaleUniforms.uInner.value = 0;
+    whale.holeLight = 1;
     if (whale.diskLight) whale.diskLight.intensity = 300;
     if (whale.state === 'ready') setWhaleStatus('A space whale swims a slow loop around the hole.');
   }
@@ -1244,11 +1245,14 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
         : ws.phase === 'aim' && d.along > 11 ? 'It swims straight at the hole…'
         : ws.phase === 'aim' ? 'It opens wide…'
         : 'It swallowed the black hole! Move the slider off 5× to bring the hole back.');
-      // The hole's light goes out as it is swallowed, and glows on inside the whale.
+      // As it is swallowed, the hole's light goes out, glows briefly through the whale's
+      // belly, and fades away over a few seconds.
       const since = ws.gulpAt === null ? -1 : now - ws.gulpAt;
-      const inner = Math.min(Math.max(since / 1.5, 0), 1);
-      whaleUniforms.uInner.value = inner * (0.85 + 0.15 * Math.sin(since * 2.2));
-      whale.diskLight.intensity = 300 * (1 - inner);
+      const gone = Math.min(Math.max(since / 1.5, 0), 1);
+      const fade = 1 - Math.min(Math.max((since - 4) / 3, 0), 1);
+      whaleUniforms.uInner.value = gone * fade * (0.85 + 0.15 * Math.sin(since * 2.2));
+      whale.diskLight.intensity = 300 * (1 - gone);
+      whale.holeLight = 1 - gone;
     }
     whaleUniforms.uMouth.value = mouth;
 
@@ -1258,7 +1262,8 @@ void main() { gl_FragColor = texture2D(uTex, gl_FragCoord.xy / uRes); }
     const toHole = p.map((v) => -v / d);
     const fromCam = add3(p, cam.pos, -1), fc = Math.hypot(...fromCam);
     const behind = Math.max(dot3(toHole, fromCam) / fc, 0);
-    const lit = whale.holeGone ? 1 - whaleUniforms.uInner.value / 0.85 : 1;
+    // The disk's rim light and reflection go out with the hole.
+    const lit = whale.swallow && whale.holeLight !== undefined ? whale.holeLight : 1;
     const rim = 2.2 * behind * Math.min(121 / (d * d), 1.5) * Math.max(lit, 0);
     whaleUniforms.uRim.value.setRGB(1.0 * rim, 0.78 * rim, 0.55 * rim);
     const glow = Math.min(121 / (d * d), 1.5) * Math.max(lit, 0);
